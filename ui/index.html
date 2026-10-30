@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Space Cutter</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top" data-tauri-drag-region>
+    <span class="brand" data-tauri-drag-region title="Space Cutter"><span class="mark-logo"><span id="logoScissors" class="logo-scis"></span><span class="dots logo"><i></i><i></i><i></i></span></span></span>
+    <div class="grow" data-tauri-drag-region></div>
+    <div class="mode" id="theme">
+      <button data-theme="light" title="Light"></button>
+      <button data-theme="auto" title="Automatic (follows the Mac)"></button>
+      <button data-theme="dark" title="Dark"></button>
+    </div>
+    <button id="help" class="soft small help">How to get the dynamic link</button>
+  </header>
+
+  <main>
+    <div class="source">
+      <div class="src-wrap">
+        <input id="src" class="field" placeholder="Paste a dynamic link or a replay link directly, or drop a file" spellcheck="false" autocomplete="off">
+        <span id="srcNote" class="src-note hidden"></span>
+      </div>
+      <button id="open" class="soft">Open</button>
+    </div>
+
+    <div class="tagline">
+      <div id="tags" class="tags"></div>
+    </div>
+
+    <section class="player">
+      <div class="deck">
+        <div class="clock"><span id="pos">00:00:00</span><span id="dur">/ 00:00:00</span><span id="liveDot" class="live-dot hidden"></span></div>
+        <div class="transport">
+          <button id="back" class="skip" title="10 seconds back (←)" aria-label="10 seconds back"></button>
+          <button id="play" class="main round" title="Play / Pause (Space)"></button>
+          <button id="fwd" class="skip" title="10 seconds forward (→)" aria-label="10 seconds forward"></button>
+        </div>
+      </div>
+      <div id="bar" class="bar off">
+        <div class="rail"><div id="played"></div></div>
+        <div id="regions"></div>
+        <div id="pending" class="pending hidden"></div>
+        <div id="snap" class="snapline hidden"></div>
+        <div id="knob" class="knob"></div>
+        <div id="tip" class="tip hidden"></div>
+      </div>
+      <div class="markrow">
+        <button id="mark" class="soft"></button>
+        <span id="msg" class="msg"></span>
+      </div>
+    </section>
+
+    <div id="clips" class="clips"></div>
+
+    <section id="mergeBox" class="merge hidden">
+      <div class="merge-head">
+        <span class="mh-title">Merged file</span>
+        <span id="mergeLen" class="mh-len"></span>
+        <div class="grow"></div>
+        <button id="keep" class="soft small" title="Also save each clip on its own"></button>
+      </div>
+      <input id="joinName" class="field small" placeholder="Merged file name" spellcheck="false" autocomplete="off">
+      <div id="mergeList" class="mlist"></div>
+    </section>
+  </main>
+
+  <footer class="bottom">
+    <div class="actions">
+      <button id="folder" class="soft folder" title=""></button>
+      <label class="switch" title="Merge all clips into one file"><input type="checkbox" id="join"><span></span>Merge</label>
+      <div class="grow"></div>
+      <button id="cancel" class="icon hidden" title="Cancel"></button>
+      <button id="cut" class="main cut"><span class="fill"></span><span class="label">Cut</span></button>
+    </div>
+    <div id="status" class="status"></div>
+  </footer>
+
+  <div id="drop" class="drop hidden"><span>Drop to add</span></div>
+  <script src="app.js"></script>
+</body>
+</html>

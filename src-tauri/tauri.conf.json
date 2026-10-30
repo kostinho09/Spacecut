@@ -1,0 +1,48 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "SpaceCutter",
+  "version": "2.0.0",
+  "identifier": "com.kostinho.spacecutter",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Space Cutter",
+        "width": 560,
+        "height": 740,
+        "minWidth": 460,
+        "minHeight": 560,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "copyright": "Copyright (C) 2026 kostinho09. GPL-3.0-or-later.",
+    "active": true,
+    "targets": [
+      "app"
+    ],
+    "category": "Utility",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "../ffmpeg/mac/ffmpeg": "ffmpeg"
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
+  }
+}

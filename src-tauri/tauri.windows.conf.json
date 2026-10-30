@@ -1,0 +1,23 @@
+{
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Space Cutter",
+        "width": 560,
+        "height": 740,
+        "minWidth": 460,
+        "minHeight": 560
+      }
+    ]
+  },
+  "bundle": {
+    "targets": [
+      "nsis"
+    ],
+    "resources": {
+      "../ffmpeg/mac/ffmpeg": null,
+      "../ffmpeg/windows/ffmpeg.exe": "ffmpeg.exe"
+    }
+  }
+}
