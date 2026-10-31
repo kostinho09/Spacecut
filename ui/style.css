@@ -234,6 +234,9 @@ main { flex: 1; overflow-y: auto; padding: 4px 18px 10px; }
   50% { opacity: .5; }
 }
 .transport { display: flex; align-items: center; gap: 8px; }
+.speed { min-width: 46px; height: 28px; padding: 0 8px; margin-right: 4px; border-radius: 999px; font-size: 12.5px; font-weight: 700; color: var(--mu); font-variant-numeric: tabular-nums; }
+.speed:hover { background: var(--hover); color: var(--fg); }
+.speed.on { background: var(--chip); color: var(--fg); }
 .skip { width: 46px; height: 46px; border-radius: 50%; display: grid; place-items: center; color: var(--fg); }
 .skip:hover { background: var(--hover); }
 .skip:active { transform: scale(.92); }
@@ -275,9 +278,9 @@ main { flex: 1; overflow-y: auto; padding: 4px 18px 10px; }
 .snapline { position: absolute; top: 1px; height: 32px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--fg); pointer-events: none; z-index: 1; }
 
 .markrow { display: flex; align-items: center; gap: 12px; }
-/* While marking: a blinking red dot, and the clip's length so far */
-#mark.pend { background: var(--c); color: var(--ct); }
-#mark .rec { width: 9px; height: 9px; border-radius: 50%; background: #e5484d; box-shadow: 0 0 0 1.5px rgba(255, 255, 255, .55); animation: rec 1.2s ease-in-out infinite; }
+/* While marking, the button keeps its usual look, with a blinking red dot
+   and the clip's length so far */
+#mark .rec { width: 9px; height: 9px; border-radius: 50%; background: #e5484d; animation: rec 1.2s ease-in-out infinite; }
 #mark .rec-len { font-variant-numeric: tabular-nums; }
 @keyframes rec { 50% { opacity: .15; } }
 .msg { flex: 1; min-width: 0; font-size: 12.5px; color: var(--mu); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

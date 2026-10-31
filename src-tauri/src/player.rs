@@ -61,6 +61,8 @@ struct Inner {
     duration: f64,
     /// Where the current session started, in seconds.
     base: f64,
+    /// Playback speed: 1 is normal, 0.5 half, 2 double.
+    speed: f64,
     session: bool,
     child: Option<ChildSlot>,
     error: Arc<Mutex<Option<String>>>,
@@ -96,7 +98,8 @@ pub struct State {
 
 impl Player {
     pub fn new(ffmpeg: Option<PathBuf>) -> Self {
-        Self { shared: Arc::new(Shared::default()), inner: Mutex::new(Inner::default()), ffmpeg }
+        let inner = Inner { speed: 1.0, ..Inner::default() };
+        Self { shared: Arc::new(Shared::default()), inner: Mutex::new(inner), ffmpeg }
     }
 
     pub fn load(&self, url: &str) -> Result<LoadInfo, String> {
@@ -163,6 +166,23 @@ impl Player {
         Ok(())
     }
 
+    /// Changes the playback speed, carrying on from the same spot.
+    pub fn set_speed(&self, speed: f64) -> Result<(), String> {
+        let speed = speed.clamp(0.5, 2.0);
+        let mut inner = self.inner.lock().unwrap();
+        if (speed - inner.speed).abs() < 1e-6 {
+            return Ok(());
+        }
+        let pos = self.position(&inner);
+        inner.speed = speed;
+        if inner.session {
+            self.ensure_audio(&mut inner)?;
+            self.restart(&mut inner, pos);
+            Self::wake(&inner);
+        }
+        Ok(())
+    }
+
     pub fn state(&self) -> State {
         let inner = self.inner.lock().unwrap();
         let sh = &self.shared;
@@ -223,7 +243,8 @@ impl Player {
 
     fn position(&self, inner: &Inner) -> f64 {
         let rate = self.shared.rate.load(Relaxed).max(1) as f64;
-        let pos = inner.base + self.shared.frames.load(Relaxed) as f64 / rate;
+        // Each second played covers `speed` seconds of the recording
+        let pos = inner.base + self.shared.frames.load(Relaxed) as f64 / rate * inner.speed;
         if inner.duration > 0.0 {
             pos.min(inner.duration)
         } else {
@@ -288,8 +309,9 @@ impl Player {
         inner.session = true;
         let (shared, error) = (self.shared.clone(), inner.error.clone());
         let (rate, channels) = self.format();
+        let speed = inner.speed;
         thread::spawn(move || {
-            let result = decode(&ffmpeg, &source, at, rate, channels, gen, &shared, &slot);
+            let result = decode(&ffmpeg, &source, at, speed, rate, channels, gen, &shared, &slot);
             if shared.gen.load(Relaxed) == gen {
                 if let Err(e) = result {
                     *error.lock().unwrap() = Some(e);
@@ -405,12 +427,14 @@ where
     }
 }
 
-/// One playback session: ffmpeg decoding from `at` onward into the shared buffer.
+/// One playback session: ffmpeg decoding from `at` onward into the shared
+/// buffer, at `speed` (pitch kept by ffmpeg's atempo filter).
 #[allow(clippy::too_many_arguments)]
 fn decode(
     ffmpeg: &Path,
     source: &Source,
     at: f64,
+    speed: f64,
     rate: u32,
     channels: u32,
     gen: u64,
@@ -436,6 +460,9 @@ fn decode(
             let from = format!("{at:.3}");
             cmd.args(["-ss", from.as_str(), "-i", input.as_str(), "-vn"]).stdin(Stdio::null());
         }
+    }
+    if (speed - 1.0).abs() > 1e-6 {
+        cmd.args(["-af", &format!("atempo={speed}")]);
     }
     let (ac, ar) = (channels.to_string(), rate.to_string());
     cmd.args(["-f", "f32le", "-ac", ac.as_str(), "-ar", ar.as_str(), "pipe:1"])
@@ -481,7 +508,8 @@ fn decode(
     };
 
     let per_frame = channels as usize;
-    let mut to_skip = (skip * rate as f64) as usize * per_frame;
+    // The skip is into the recording; sped up, it takes less output to cover
+    let mut to_skip = (skip / speed * rate as f64) as usize * per_frame;
     let cap = (AHEAD_SECS * rate as f64) as usize * per_frame;
     let mut raw = vec![0u8; 32 * 1024];
     let mut pending: Vec<u8> = Vec::new();
@@ -575,7 +603,7 @@ mod tests {
         let shared = Arc::new(Shared::default());
         let worker = {
             let shared = shared.clone();
-            thread::spawn(move || decode(&ffmpeg, &source, at, RATE, 2, 0, &shared, &ChildSlot::default()))
+            thread::spawn(move || decode(&ffmpeg, &source, at, 1.0, RATE, 2, 0, &shared, &ChildSlot::default()))
         };
         let want = (secs * RATE as f64) as usize * 2;
         let started = Instant::now();
@@ -636,6 +664,61 @@ mod tests {
             }
         }
         best
+    }
+
+    /// Seconds of output the player makes from `at` to the end of a file, at `speed`.
+    fn output_secs(path: &Path, at: f64, speed: f64) -> f64 {
+        let ffmpeg = ffmpeg::locate(None).expect("ffmpeg");
+        let source = Source::Direct(path.to_string_lossy().into_owned());
+        let shared = Arc::new(Shared::default());
+        let worker = {
+            let shared = shared.clone();
+            thread::spawn(move || decode(&ffmpeg, &source, at, speed, RATE, 2, 0, &shared, &ChildSlot::default()))
+        };
+        let mut samples = 0;
+        loop {
+            let done = worker.is_finished();
+            samples += shared.buf.lock().unwrap().drain(..).count();
+            shared.room.notify_all();
+            if done {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        worker.join().unwrap().unwrap();
+        samples as f64 / 2.0 / RATE as f64
+    }
+
+    #[test]
+    fn plays_faster_and_slower() {
+        // Ten seconds of a tone, written as a plain WAV file
+        let path = std::env::temp_dir().join(format!("spacecutter_speed_{}.wav", std::process::id()));
+        let n = 10 * RATE;
+        let mut wav = Vec::new();
+        for (tag, value) in [("RIFF", 36 + n * 2), ("WAVE", 0), ("fmt ", 16)] {
+            wav.extend_from_slice(tag.as_bytes());
+            if tag != "WAVE" {
+                wav.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        wav.extend_from_slice(&[1, 0, 1, 0]);
+        wav.extend_from_slice(&RATE.to_le_bytes());
+        wav.extend_from_slice(&(RATE * 2).to_le_bytes());
+        wav.extend_from_slice(&[2, 0, 16, 0]);
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(n * 2).to_le_bytes());
+        for i in 0..n {
+            let v = ((i as f32 * 440.0 * std::f32::consts::TAU / RATE as f32).sin() * 8000.0) as i16;
+            wav.extend_from_slice(&v.to_le_bytes());
+        }
+        std::fs::write(&path, wav).unwrap();
+
+        let cases = [(0.0, 1.0, 10.0), (0.0, 2.0, 5.0), (0.0, 0.5, 20.0), (4.0, 1.5, 4.0)];
+        let got: Vec<f64> = cases.iter().map(|&(at, speed, _)| output_secs(&path, at, speed)).collect();
+        let _ = std::fs::remove_file(&path);
+        for (&(at, speed, want), got) in cases.iter().zip(&got) {
+            assert!((got - want).abs() < 0.1, "from {at} s at {speed}×: {got:.2} s, expected {want} s");
+        }
     }
 
     #[test]

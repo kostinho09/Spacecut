@@ -145,6 +145,11 @@ fn player_seek(state: State<AppState>, t: f64) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn player_speed(state: State<AppState>, speed: f64) -> Result<(), String> {
+    state.player.set_speed(speed)
+}
+
+#[tauri::command]
 fn player_state(state: State<AppState>) -> player::State {
     state.player.state()
 }
@@ -213,6 +218,7 @@ fn main() {
             player_pause,
             player_seek,
             player_state,
+            player_speed,
             fx_play,
             fx_stop,
             sound_length,

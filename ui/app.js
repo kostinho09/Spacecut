@@ -111,6 +111,7 @@ const S = {
   actionAt: 0,
   shownSec: -1,
   shownRec: -1,
+  speed: 1,
   msgTimer: 0,
   fxPath: null,
   fxSince: 0,
@@ -425,7 +426,7 @@ function renderFolder() {
 function currentPos() {
   const p = S.p;
   let pos = p.pos;
-  if (p.playing && !p.buffering) pos += (performance.now() - p.at) / 1000;
+  if (p.playing && !p.buffering) pos += ((performance.now() - p.at) / 1000) * S.speed;
   return p.duration ? Math.min(pos, p.duration) : pos;
 }
 
@@ -440,12 +441,11 @@ function renderPlayer() {
   $('#dur').textContent = `/ ${fmt(p.duration)}`;
   showPlaying();
   const ready = !!s && p.loaded && !p.loading;
-  for (const id of ['play', 'back', 'fwd', 'mark']) $(`#${id}`).disabled = !ready;
+  for (const id of ['speed', 'play', 'back', 'fwd', 'mark']) $(`#${id}`).disabled = !ready;
   ui.bar.classList.toggle('off', !ready || !p.duration);
   if (s) for (const [k, v] of Object.entries(colorVars(s))) document.documentElement.style.setProperty(k, v);
   const mark = $('#mark');
   const pend = !!pendingClip();
-  mark.classList.toggle('pend', pend);
   // While a clip is being marked: a red recording dot and how long it is so far
   mark.innerHTML = pend
     ? '<span class="rec"></span><span>Mark end</span><span class="rec-len"></span>'
@@ -1271,6 +1271,21 @@ for (const [id, dir] of [['#back', -1], ['#fwd', 1]]) {
   btn.addEventListener('click', e => { if (e.detail === 0) skip(dir, true); });
 }
 $('#mark').addEventListener('click', toggleMark);
+
+// Playback speed: one button, each click moves to the next speed
+const SPEEDS = [1, 1.25, 1.5, 2, 0.5];
+$('#speed').addEventListener('click', async e => {
+  const p = S.p;
+  p.pos = currentPos();
+  p.at = performance.now();
+  S.speed = SPEEDS[(SPEEDS.indexOf(S.speed) + 1) % SPEEDS.length];
+  e.currentTarget.textContent = `${S.speed}×`;
+  e.currentTarget.classList.toggle('on', S.speed !== 1);
+  if (p.playing) p.buffering = true;
+  try { await invoke('player_speed', { speed: S.speed }); }
+  catch (err) { setStatus(String(err), 'bad'); }
+  pollSoon();
+});
 
 /* ── Theme ──────────────────────────────────────────── */
 
