@@ -1,8 +1,11 @@
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use regex::Regex;
 
 fn agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
@@ -48,11 +51,18 @@ pub struct Segment {
     pub url: String,
 }
 
+#[derive(Clone)]
 pub struct Playlist {
     pub segments: Vec<Segment>,
     pub duration: f64,
     /// When the Space was recorded, if the playlist says.
     pub started: Option<String>,
+    /// The media playlist it was read from.
+    pub url: String,
+    /// Its pieces are taken from elsewhere than the list says (see `resolve`).
+    pub moved: bool,
+    /// The recording is over: the list won't grow any more.
+    pub ended: bool,
 }
 
 /// Segments of a media playlist, each placed on the timeline the cut
@@ -102,7 +112,8 @@ pub fn load_playlist(url: &str) -> Result<Playlist, String> {
             .lines()
             .find_map(|l| l.trim().strip_prefix("#EXT-X-PROGRAM-DATE-TIME:"))
             .map(|s| s.trim().to_string());
-        return Ok(Playlist { segments, duration, started });
+        let ended = text.contains("#EXT-X-ENDLIST");
+        return Ok(Playlist { segments, duration, started, url, moved: false, ended });
     }
     Err("The playlist points to too many other playlists".into())
 }
@@ -116,17 +127,8 @@ fn temp_path(ext: &str) -> PathBuf {
 /// Spaces whose timestamps start near the MPEG-TS limit wrap around
 /// mid-stream, so seeking past that point yields an empty file. This writes a
 /// local playlist with only the segments covering `s0..e0` and returns it with
-/// the offset of `s0` into its first segment. None if `url` isn't a plain
-/// media playlist.
-pub fn trim_playlist(url: &str, s0: f64, e0: f64) -> Option<(PathBuf, f64)> {
-    if !is_m3u8(url) {
-        return None;
-    }
-    let text = get_text(url).ok()?;
-    if !text.contains("#EXTM3U") || text.contains("#EXT-X-STREAM-INF") {
-        return None;
-    }
-    let segments = parse_media(&text, url);
+/// the offset of `s0` into its first segment. None if no segment covers it.
+pub fn trim_playlist(segments: &[Segment], s0: f64, e0: f64) -> Option<(PathBuf, f64)> {
     let picked: Vec<&Segment> = segments.iter().filter(|s| s.start + s.dur > s0 && s.start < e0).collect();
     let first = picked.first()?;
     let longest = picked.iter().map(|s| s.dur).fold(0.0, f64::max);
@@ -143,23 +145,223 @@ pub fn trim_playlist(url: &str, s0: f64, e0: f64) -> Option<(PathBuf, f64)> {
     Some((path, (s0 - first.start).max(0.0)))
 }
 
-/// The Replay URL of a Space, from the dynamic URL it had while live.
+/// X's other servers for the same files. The one in a link sometimes refuses
+/// a Space the others still give out (prod-fastly-eu-central-1 did).
+const OTHER_HOSTS: [&str; 2] = ["prod-fastly-a.video.pscp.tv", "prod-fastly-p.video.pscp.tv"];
+
+/// A link, then the same on X's other servers.
+fn on_hosts(url: &str) -> Vec<String> {
+    let mut out = vec![url.to_string()];
+    if let Ok(parsed) = url::Url::parse(url) {
+        if parsed.host_str().is_some_and(|h| h.ends_with(".video.pscp.tv")) {
+            for host in OTHER_HOSTS {
+                let mut other = parsed.clone();
+                if other.set_host(Some(host)).is_ok() && !out.contains(&other.to_string()) {
+                    out.push(other.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The two forms of a Space's replay link, from its dynamic link and the
+/// playlist name its master gives (`playlist_<number>`), in the order tried:
+/// first where X keeps replays now (pdxa), then beside the dynamic playlist.
+fn replay_forms(dynamic: &str, name: &str) -> (String, String) {
+    let pdxa = match (dynamic.find("/Transcoding/"), dynamic.find("/non_transcode/")) {
+        (Some(t), Some(n)) => format!("{}/a{}/{REPLAYS}/audio-space/{name}.m3u8?type=replay", &dynamic[..t], &dynamic[t..n]),
+        _ => String::new(),
+    };
+    let beside = dynamic.replace("dynamic_playlist.m3u8", &format!("{name}.m3u8")).replace("type=live", "type=replay");
+    (pdxa, beside)
+}
+
+/// The Replay URL of a Space, from the dynamic URL it had while live: with the
+/// playlist name from the master, first the pdxa form, then the one beside the
+/// dynamic playlist, whichever opens (list and audio) first. Tried on the
+/// link's server, then on X's other servers; if nothing opens, the pdxa form.
 pub fn live_to_replay(dynamic: &str) -> Result<String, String> {
     let dynamic = dynamic.trim();
-    let master = dynamic.replace("/dynamic_playlist.m3u8?type=live", "/master_playlist.m3u8");
-    let text = agent()
-        .get(&master)
-        .timeout(Duration::from_secs(10))
-        .call()
-        .map_err(|e| e.to_string())?
-        .into_string()
-        .map_err(|e| e.to_string())?;
-    let data = text
-        .split("audio-space/")
-        .nth(1)
-        .ok_or("The server did not answer with a playlist")?
-        .replace(['\n', '\r'], "");
-    Ok(dynamic.replace("dynamic_playlist.m3u8", &data).replace("type=live", "type=replay"))
+    if live_base(dynamic).is_none() || !dynamic.contains("/non_transcode/") {
+        return Err("this is not a Space's dynamic link".into());
+    }
+    // Only the list is asked for here; whether its audio plays is the
+    // player's to find out, which falls back to the live pieces if not
+    let opens_there = |url: &String| !url.is_empty() && load_playlist(url).is_ok_and(|list| !list.segments.is_empty());
+    let mut first = None;
+    for dynamic in on_hosts(dynamic) {
+        let master = dynamic.replace("/dynamic_playlist.m3u8?type=live", "/master_playlist.m3u8");
+        let name = agent()
+            .get(&master)
+            .timeout(Duration::from_secs(10))
+            .call()
+            .ok()
+            .and_then(|r| r.into_string().ok())
+            .and_then(|text| Regex::new(r"playlist_\d+").ok()?.find(&text).map(|m| m.as_str().to_string()));
+        let (pdxa, beside) = replay_forms(&dynamic, name.as_deref().unwrap_or("playlist_0"));
+        first.get_or_insert(pdxa.clone());
+        if opens_there(&pdxa) {
+            return Ok(pdxa);
+        }
+        if name.is_some() && opens_there(&beside) {
+            return Ok(beside);
+        }
+    }
+    first.filter(|f| !f.is_empty()).ok_or_else(|| "this is not a Space's dynamic link".into())
+}
+
+/// The folder where the live stream of a Space kept its pieces: the
+/// dynamic link's own.
+pub fn live_base(dynamic: &str) -> Option<String> {
+    let dynamic = dynamic.trim();
+    dynamic.find("dynamic_playlist.m3u8").map(|i| dynamic[..i].to_string())
+}
+
+/// The dynamic link a Space's other links (replay, master) stand beside.
+fn dynamic_of(url: &str) -> Option<String> {
+    let url = url.trim();
+    if !url.contains("/non_transcode/") || !url.contains("/audio-space/") || !is_m3u8(url) {
+        return None;
+    }
+    let folder = &url[..url.split('?').next()?.rfind('/')? + 1];
+    Some(format!("{folder}dynamic_playlist.m3u8?type=live"))
+}
+
+/// The replay as Spaces used to have it: named in the master playlist,
+/// beside the dynamic one. Asks the server.
+fn replay_beside_live(dynamic: &str) -> Option<String> {
+    on_hosts(dynamic).into_iter().find_map(|dynamic| {
+        let master = dynamic.replace("/dynamic_playlist.m3u8?type=live", "/master_playlist.m3u8");
+        let text = agent().get(&master).timeout(Duration::from_secs(10)).call().ok()?.into_string().ok()?;
+        let name = text.split("audio-space/").nth(1)?.lines().next()?.trim().to_string();
+        Some(dynamic.replace("dynamic_playlist.m3u8", &name).replace("type=live", "type=replay"))
+    })
+}
+
+/// Whether the server gives out a piece.
+fn opens(segment: &Segment) -> bool {
+    agent().get(&segment.url).timeout(Duration::from_secs(10)).call().is_ok()
+}
+
+/// The same pieces, taken from where the live stream kept them.
+fn at_live(mut list: Playlist, base: &str) -> Playlist {
+    for seg in &mut list.segments {
+        let name = seg.url.split('?').next().unwrap_or("").rsplit('/').next().unwrap_or("");
+        seg.url = format!("{base}{name}?type=live");
+    }
+    list.moved = true;
+    list
+}
+
+/// Where X keeps Space replays now, under each Space's own key; any playlist
+/// number opens the whole list there.
+const REPLAYS: &str = "non_transcode/pdxa/periscope-replays-public";
+
+/// The replay where X keeps them, under a number not asked for before, so a
+/// cache along the way can't hand back an older list of a Space still live.
+fn archive_of(dynamic: &str) -> Option<String> {
+    let key_end = dynamic.find("/non_transcode/")?;
+    let number = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    Some(format!("{}/{REPLAYS}/audio-space/playlist_{number}.m3u8?type=replay", &dynamic[..key_end]))
+}
+
+/// A Space's playlist, ready to play and cut. Knowing the Space (from its
+/// dynamic link `live`, or from any link of it), each on the link's server
+/// and then on X's other servers:
+/// 1. where X keeps replays now (`REPLAYS`, pdxa),
+/// 2. the pieces where the live stream kept them (atla, say),
+/// and only if both fail, the link as given, then the replay as Spaces used
+/// to have it, beside the dynamic playlist.
+pub fn resolve(url: &str, live: Option<&str>) -> Result<Playlist, String> {
+    if let Some(list) = recall(url, live) {
+        return Ok(list);
+    }
+    let list = find(url, live)?;
+    remember(url, live, &list);
+    Ok(list)
+}
+
+/// Where a Space's audio was found, so the player (on every load) and each
+/// clip of a cut don't look again. A finished recording is kept for good; one
+/// still live for a minute, as its list keeps growing.
+struct Found {
+    list: Playlist,
+    at: Instant,
+}
+
+fn found() -> &'static Mutex<HashMap<String, Found>> {
+    static FOUND: OnceLock<Mutex<HashMap<String, Found>>> = OnceLock::new();
+    FOUND.get_or_init(Default::default)
+}
+
+fn key(url: &str, live: Option<&str>) -> String {
+    format!("{}|{}", url.trim(), live.unwrap_or("").trim())
+}
+
+fn remember(url: &str, live: Option<&str>, list: &Playlist) {
+    found().lock().unwrap().insert(key(url, live), Found { list: list.clone(), at: Instant::now() });
+}
+
+fn recall(url: &str, live: Option<&str>) -> Option<Playlist> {
+    let found = found().lock().unwrap();
+    let hit = found.get(&key(url, live))?;
+    (hit.list.ended || hit.at.elapsed() < Duration::from_secs(60)).then(|| hit.list.clone())
+}
+
+fn find(url: &str, live: Option<&str>) -> Result<Playlist, String> {
+    // Any link of a Space (a replay, say) tells its key and folder
+    let derived = dynamic_of(url);
+    let Some(dynamic) = live.filter(|d| live_base(d).is_some()).or(derived.as_deref()) else {
+        return load_playlist(url);
+    };
+    let plays = |list: &Playlist| list.segments.first().is_some_and(opens);
+    let mut error = None;
+    // A list of the pieces, wherever their audio turns out to be
+    let mut names = None;
+    // A pdxa link as given is tried as it is, before asking again under a new number
+    let as_given = url.contains(REPLAYS).then(|| url.to_string());
+    for candidate in as_given.into_iter().chain(archive_of(dynamic).map(|a| on_hosts(&a)).unwrap_or_default()) {
+        match load_playlist(&candidate) {
+            Ok(mut list) if plays(&list) => {
+                list.moved = candidate != url;
+                return Ok(list);
+            }
+            Ok(list) => {
+                names.get_or_insert(list);
+            }
+            Err(e) => {
+                error.get_or_insert(e);
+            }
+        }
+    }
+    let given = on_hosts(url).into_iter().find_map(|candidate| match load_playlist(&candidate) {
+        Ok(list) => Some((candidate, list)),
+        Err(e) => {
+            error.get_or_insert(e);
+            None
+        }
+    });
+    if let Some(list) = names.as_ref().or(given.as_ref().map(|(_, list)| list)) {
+        for base in on_hosts(dynamic).iter().filter_map(|d| live_base(d)) {
+            // The first live pieces may be gone already; one in the middle tells
+            let moved = at_live(list.clone(), &base);
+            if moved.segments.get(moved.segments.len() / 2).is_some_and(opens) {
+                return Ok(moved);
+            }
+        }
+    }
+    if let Some((candidate, mut list)) = given {
+        if plays(&list) {
+            list.moved = candidate != url;
+            return Ok(list);
+        }
+    }
+    let error = error.unwrap_or_else(|| "The server no longer gives out this Space's audio".into());
+    let old = replay_beside_live(dynamic).ok_or(error.clone())?;
+    let mut list = load_playlist(&old).map_err(|_| error)?;
+    list.moved = list.url != url;
+    Ok(list)
 }
 
 /// The raw AAC of a Space segment: each one opens with ID3 tags (stream
@@ -184,6 +386,102 @@ pub fn strip_id3(mut b: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How long each step takes on a real Space:
+    /// DYNAMIC_URL='https://…/dynamic_playlist.m3u8?type=live' cargo test -- --ignored --nocapture times_
+    #[test]
+    #[ignore]
+    fn times_the_steps() {
+        let dynamic = std::env::var("DYNAMIC_URL").expect("set DYNAMIC_URL");
+        let t = std::time::Instant::now();
+        let replay = live_to_replay(&dynamic).unwrap();
+        println!("convert: {:.2} s", t.elapsed().as_secs_f64());
+        let t = std::time::Instant::now();
+        let list = resolve(&replay, Some(&dynamic)).unwrap();
+        println!("player load right after: {:.3} s, {} pieces", t.elapsed().as_secs_f64(), list.segments.len());
+        let t = std::time::Instant::now();
+        resolve(&replay, Some(&dynamic)).unwrap();
+        println!("each later load or clip: {:.3} s", t.elapsed().as_secs_f64());
+        let t = std::time::Instant::now();
+        let fresh = find(&replay, Some(&dynamic)).unwrap();
+        println!("looking it up afresh (pdxa link used as given): {:.2} s, from {}", t.elapsed().as_secs_f64(), if fresh.url == replay { "the link itself" } else { "elsewhere" });
+        let t = std::time::Instant::now();
+        let plain = load_playlist(&replay).unwrap();
+        println!("just the list: {:.2} s, {} pieces", t.elapsed().as_secs_f64(), plain.segments.len());
+        let t = std::time::Instant::now();
+        for seg in list.segments.iter().take(5) {
+            assert!(opens(seg));
+        }
+        println!("5 pieces one by one: {:.2} s", t.elapsed().as_secs_f64());
+    }
+
+    /// The user's own example: these two links, in this order.
+    #[test]
+    fn makes_both_replay_forms_exactly() {
+        let dynamic = "https://prod-fastly-a.video.pscp.tv/Transcoding/v1/hls/EXAMPLE_SPACE_KEY/non_transcode/atla/x-media-live-stream-atla/audio-space/dynamic_playlist.m3u8?type=live";
+        let (pdxa, beside) = replay_forms(dynamic, "playlist_16653265225496066892");
+        assert_eq!(pdxa, "https://prod-fastly-a.video.pscp.tv/a/Transcoding/v1/hls/EXAMPLE_SPACE_KEY/non_transcode/pdxa/periscope-replays-public/audio-space/playlist_16653265225496066892.m3u8?type=replay");
+        assert_eq!(beside, "https://prod-fastly-a.video.pscp.tv/Transcoding/v1/hls/EXAMPLE_SPACE_KEY/non_transcode/atla/x-media-live-stream-atla/audio-space/playlist_16653265225496066892.m3u8?type=replay");
+    }
+
+    #[test]
+    fn knows_where_a_spaces_replay_and_pieces_are() {
+        let base = "https://prod-fastly-a.video.pscp.tv/Transcoding/v1/hls/KEY/non_transcode/atla/x-media-live-stream-atla/audio-space";
+        let dynamic = format!("{base}/dynamic_playlist.m3u8?type=live");
+        assert_eq!(live_base(&dynamic).unwrap(), format!("{base}/"));
+        assert_eq!(dynamic_of(&format!("{base}/playlist_1665.m3u8?type=replay")).unwrap(), dynamic);
+        assert_eq!(dynamic_of("https://example.com/a.m3u8"), None);
+        let hosts = on_hosts(&dynamic);
+        assert_eq!(hosts.len(), 2, "prod-fastly-a is already the link's own: {hosts:?}");
+        assert!(hosts[1].starts_with("https://prod-fastly-p.video.pscp.tv/Transcoding/"));
+        assert_eq!(on_hosts("https://example.com/a.m3u8").len(), 1);
+        let archive = archive_of(&dynamic).unwrap();
+        assert!(archive.starts_with("https://prod-fastly-a.video.pscp.tv/Transcoding/v1/hls/KEY/non_transcode/pdxa/periscope-replays-public/audio-space/playlist_"));
+        assert!(archive.ends_with(".m3u8?type=replay") && archive != archive_of(&dynamic).unwrap());
+    }
+
+    #[test]
+    fn takes_pieces_from_the_live_folder() {
+        let list = Playlist {
+            segments: vec![Segment { start: 0.0, dur: 3.0, url: "https://h/a/x/transcode/pdxa/r/JWT/audio-space/chunk_1_0_b.aac".into() }],
+            duration: 3.0,
+            started: None,
+            url: String::new(),
+            moved: false,
+            ended: true,
+        };
+        let moved = at_live(list, "https://h/x/non_transcode/atla/live/audio-space/");
+        assert_eq!(moved.segments[0].url, "https://h/x/non_transcode/atla/live/audio-space/chunk_1_0_b.aac?type=live");
+        assert!(moved.moved);
+    }
+
+    /// Needs the network and a Space that is live or recently ended:
+    /// DYNAMIC_URL='https://…/dynamic_playlist.m3u8?type=live' cargo test -- --ignored resolves
+    #[test]
+    #[ignore]
+    fn resolves_the_replay_and_falls_back_to_the_live_pieces() {
+        let dynamic = std::env::var("DYNAMIC_URL").expect("set DYNAMIC_URL");
+        let replay = live_to_replay(&dynamic).unwrap();
+        let list = resolve(&replay, Some(&dynamic)).unwrap();
+        println!("replay: {} pieces, {:.0} s, from {}", list.segments.len(), list.duration, list.segments[0].url);
+        assert!(list.segments.len() > 10 && list.segments[0].url.contains("/pdxa/periscope-replays-public/"), "pdxa comes first");
+        // A replay link alone, even one where no replay is, finds the same
+        let beside = dynamic.replace("dynamic_playlist.m3u8", "playlist_16653273897914402342.m3u8").replace("type=live", "type=replay");
+        let list = resolve(&beside, None).unwrap();
+        println!("old-style replay link alone: {} pieces from {}", list.segments.len(), list.segments[0].url);
+        assert!(list.segments[0].url.contains("/pdxa/periscope-replays-public/"));
+        // The master's own path lists the pieces but refuses them: the live ones stand in
+        let master = dynamic.replace("/dynamic_playlist.m3u8?type=live", "/master_playlist.m3u8");
+        let text = get_text(&master).unwrap();
+        let refused = join(&master, text.lines().find(|l| l.starts_with('/')).unwrap().trim());
+        let list = resolve(&refused, Some(&dynamic)).unwrap();
+        println!("refused replay -> {} pieces from {}", list.segments.len(), list.segments[list.segments.len() / 2].url);
+        assert!(list.moved && list.segments[0].url.contains("/pdxa/periscope-replays-public/"), "pdxa comes first");
+        // With pdxa out of reach too (a key it doesn't know), the live pieces stand in
+        let pieces = at_live(load_playlist(&refused).unwrap(), &live_base(&dynamic).unwrap());
+        assert!(pieces.segments.get(pieces.segments.len() / 2).is_some_and(opens), "a live piece opens");
+
+    }
 
     #[test]
     fn strips_the_id3_tags_of_a_space_segment() {

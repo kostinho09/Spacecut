@@ -102,13 +102,14 @@ impl Player {
         Self { shared: Arc::new(Shared::default()), inner: Mutex::new(inner), ffmpeg }
     }
 
-    pub fn load(&self, url: &str) -> Result<LoadInfo, String> {
+    /// Opens a Space or a file; `live` is a Space's dynamic link, if known.
+    pub fn load(&self, url: &str, live: Option<&str>) -> Result<LoadInfo, String> {
         let url = url.trim();
         if url.is_empty() {
             return Err("Paste a Replay URL or choose a file first".into());
         }
         let (source, duration, started) = if hls::is_m3u8(url) {
-            let list = hls::load_playlist(url)?;
+            let list = hls::resolve(url, live)?;
             (Source::Hls(Arc::new(list.segments)), list.duration, list.started)
         } else {
             let web = url.starts_with("http://") || url.starts_with("https://");
@@ -744,6 +745,7 @@ mod tests {
                 end: "02:35:20".into(),
                 name: "reference".into(),
                 length: 0.0,
+                live: String::new(),
             }],
             output_folder: dir.to_string_lossy().into_owned(),
             merge: false,

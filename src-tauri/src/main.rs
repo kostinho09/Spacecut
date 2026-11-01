@@ -5,6 +5,7 @@ mod ffmpeg;
 mod hls;
 mod player;
 mod prefs;
+mod update;
 mod util;
 
 use std::path::PathBuf;
@@ -124,9 +125,9 @@ async fn convert_live(url: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn player_load(state: State<'_, AppState>, url: String) -> Result<player::LoadInfo, String> {
+async fn player_load(state: State<'_, AppState>, url: String, live: Option<String>) -> Result<player::LoadInfo, String> {
     let player = state.player.clone();
-    blocking(move || player.load(&url)).await?
+    blocking(move || player.load(&url, live.as_deref())).await?
 }
 
 #[tauri::command]
@@ -181,6 +182,23 @@ fn cancel_job(state: State<AppState>) {
     state.job.stop();
 }
 
+/// A newer version on GitHub, checked at most once a day.
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Result<Option<update::Update>, String> {
+    let current = app.package_info().version.to_string();
+    blocking(move || update::check(&current)).await
+}
+
+#[tauri::command]
+fn dismiss_update(version: String) {
+    update::dismiss(&version);
+}
+
+#[tauri::command]
+fn open_update(url: String) -> Result<(), String> {
+    update::open(&url)
+}
+
 /// Says the cut is over, unless the user is already looking at the window.
 #[tauri::command]
 fn notify_done(app: AppHandle, window: tauri::Window, body: String) {
@@ -225,6 +243,9 @@ fn main() {
             start_job,
             cancel_job,
             notify_done,
+            check_update,
+            dismiss_update,
+            open_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while starting Space Cutter")

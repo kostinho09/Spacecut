@@ -120,14 +120,17 @@ const S = {
 
 /** Status of a clip: its icon, a class, and what the icon means. */
 const ST_ICON = {
-  // The three dots lighting up one by one while the clip is cut
+  // The three dots turning into squares one by one while the clip is cut
   cut: '<span class="dots"><i></i><i></i><i></i></span>',
+  // The same dots, faded and still, on the clips still waiting their turn
+  wait: '<span class="dots wait"><i></i><i></i><i></i></span>',
   conv: '<svg viewBox="0 0 24 24" class="turn" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19.5 12a7.5 7.5 0 0 1-12.8 5.3M4.5 12a7.5 7.5 0 0 1 12.8-5.3"/><path d="M17.6 2.8v3.9h-3.9M6.4 21.2v-3.9h3.9"/></svg>',
   done: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor"/><path d="M7.4 12.4l3 3 6.2-6.6" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   bad: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor"/><path d="M12 7v6" stroke="#fff" stroke-width="2.6" stroke-linecap="round"/><circle cx="12" cy="16.8" r="1.5" fill="#fff"/></svg>',
 };
 const STATUS = {
   Pending: ['', ''],
+  Waiting: ['wait', '', 'Waiting its turn'],
   Cutting: ['cut', 'busy', 'Cutting…'],
   Slow: ['cut', 'busy', 'Still cutting…'],
   Converting: ['conv', 'busy', 'Converting…'],
@@ -149,6 +152,10 @@ const clipsOf = id => S.clips.filter(c => c.src === id);
 const active = () => srcById(S.active);
 const colorVars = s => ({ '--c': s.color[0], '--ct': s.color[1] });
 const usable = c => c.full || (parseHMS(c.start) != null && parseHMS(c.end) != null);
+/** A clip the running cut is working on: it stays as it is until the cut ends. */
+const inJob = c => S.running && S.jobIds.includes(c.id);
+/** A clip of the running cut that hasn't started yet shows that it waits. */
+const statusOf = c => (c.status === 'Pending' && inJob(c) ? STATUS.Waiting : STATUS[c.status] || STATUS.Pending);
 
 /* ── Sources (tags) ─────────────────────────────────── */
 
@@ -157,11 +164,13 @@ function nextColor() {
   return COLORS.find(c => !used.has(c[0])) || COLORS[S.sources.length % COLORS.length];
 }
 
-function addSource(url) {
+/** `live` is the Space's dynamic link, when it came from one: where its
+ *  pieces can still be found if the replay doesn't give them out. */
+function addSource(url, live = '') {
   let s = S.sources.find(x => x.url === url);
   if (s) return s;
   const local = isLocal(url);
-  s = { id: S.nextId++, url, local, name: local ? baseName(url) : `Space ${++S.spaceNo}`,
+  s = { id: S.nextId++, url, live, local, name: local ? baseName(url) : `Space ${++S.spaceNo}`,
         color: nextColor(), include: true, lastPos: 0 };
   S.sources.push(s);
   S.newTag = s.id;
@@ -199,8 +208,10 @@ async function addLink(raw) {
   let url = (raw || '').trim();
   if (!url || adding) return;
   adding = true;
+  let live = '';
   try {
     if (/dynamic_playlist\.m3u8/i.test(url) && /type=live/i.test(url)) {
+      live = url;
       srcNote(`Live ${ICON.arrow} <b>Replay</b>`, 'conv');
       try { url = await invoke('convert_live', { url }); }
       catch (e) { srcNote(''); flash(`Could not convert the live link (${e})`, 'bad'); return; }
@@ -208,10 +219,9 @@ async function addLink(raw) {
       input.classList.remove('swap');
       void input.offsetWidth;
       input.classList.add('swap');
-      await wait(380);
     }
     sendOff(input);
-    await activate(addSource(url).id);
+    await activate(addSource(url, live).id);
   } finally {
     adding = false;
   }
@@ -258,7 +268,7 @@ function tagMenu(e, s) {
       activate(s.id);
     } },
     '-',
-    { label: 'Remove', danger: true, run: () => removeSource(s.id) },
+    { label: 'Remove', danger: true, off: clipsOf(s.id).some(inJob), run: () => removeSource(s.id) },
   ]);
 }
 
@@ -354,8 +364,8 @@ function renderClips() {
 }
 
 function buildClip(c, i, s) {
-  const locked = S.running;
-  const st = STATUS[c.status] || STATUS.Pending;
+  const locked = inJob(c);
+  const st = statusOf(c);
   const el = h('div', { class: `clip${S.sel === c.id ? ' sel' : ''}`, dataset: { id: String(c.id) }, style: colorVars(s) },
     h('span', { class: 'cnum', title: 'Play from here', 'data-act': 'seek' }, String(i + 1)),
     h('input', { class: 'cname', 'data-col': 'name', value: c.name, placeholder: 'Add a title, or get a random name', spellcheck: 'false', autocomplete: 'off', disabled: locked,
@@ -376,7 +386,7 @@ function buildClip(c, i, s) {
 function syncStatus(c) {
   const el = ui.clips.querySelector(`.clip[data-id="${c.id}"] .st`);
   if (!el) return;
-  const st = STATUS[c.status] || STATUS.Pending;
+  const st = statusOf(c);
   el.className = `st ${st[1]}${c.status === 'Done' ? ' fresh' : ''}`;
   el.innerHTML = ST_ICON[st[0]] || '';
   el.title = (st[1] === 'bad' && c.reason) || st[2] || '';
@@ -446,10 +456,11 @@ function renderPlayer() {
   if (s) for (const [k, v] of Object.entries(colorVars(s))) document.documentElement.style.setProperty(k, v);
   const mark = $('#mark');
   const pend = !!pendingClip();
-  // While a clip is being marked: a red recording dot and how long it is so far
+  // While a clip is being marked: a blinking red ring and how long it is so far
+  mark.classList.toggle('rec', pend);
   mark.innerHTML = pend
-    ? '<span class="rec"></span><span>Mark end</span><span class="rec-len"></span>'
-    : `${ICON.scissors}<span>Mark start</span>`;
+    ? '<span>Mark end</span><span class="rec-len"></span>'
+    : '<span>Mark start</span>';
   S.shownSec = -1;
   S.shownRec = -1;
   renderMsg();
@@ -485,7 +496,7 @@ async function loadPlayer(s) {
   Object.assign(S.p, { loading: true, loaded: false, playing: false, buffering: false, error: '', url: s.url, duration: 0, pos: 0 });
   renderPlayer();
   try {
-    const info = await invoke('player_load', { url: s.url });
+    const info = await invoke('player_load', { url: s.url, live: s.live || null });
     if (token !== S.loadToken) return;
     Object.assign(S.p, { loading: false, loaded: true, duration: info.duration, pos: 0, at: performance.now(), ended: false });
     s.duration = info.duration;
@@ -561,6 +572,8 @@ function showPlaying() {
   const dot = $('#liveDot');
   dot.classList.toggle('hidden', !p.loaded || !active());
   dot.classList.toggle('on', p.playing && !p.buffering);
+  // The logo's dots become a sound meter while a Space plays
+  document.body.classList.toggle('playing', p.playing && !p.buffering);
 }
 
 /** Asks the player often while it plays or loads, and rarely while it sits still. */
@@ -652,7 +665,7 @@ function renderRegions() {
 }
 
 function markStart() {
-  if (!S.p.loaded || S.running) return;
+  if (!S.p.loaded) return;
   const t = Math.round(currentPos());
   const c = freshClip();
   touched(c);
@@ -721,6 +734,12 @@ function hitAt(x) {
   return null;
 }
 
+/** A period under the pointer that can be moved: not one being cut right now. */
+function freeHit(x) {
+  const hit = hitAt(x);
+  return hit && !inJob(hit.c) ? hit : null;
+}
+
 function showTip(x) {
   const b = ui.bar.getBoundingClientRect();
   const snap = S.drag && S.drag.moved ? null : snapAt(x);
@@ -747,7 +766,7 @@ ui.bar.addEventListener('pointerdown', e => {
   if (e.button !== 0 || !S.p.loaded || !S.p.duration) return;
   e.preventDefault();
   ui.bar.setPointerCapture(e.pointerId);
-  const hit = S.running ? null : hitAt(e.clientX);
+  const hit = freeHit(e.clientX);
   S.drag = { x0: e.clientX, t0: timeAt(e.clientX), hit, moved: false, preview: null,
              a: hit ? parseHMS(hit.c.start) : 0, b: hit ? parseHMS(hit.c.end) : 0 };
   if (hit) select(hit.c.id);
@@ -758,7 +777,7 @@ ui.bar.addEventListener('pointermove', e => {
   showTip(e.clientX);
   const d = S.drag;
   if (!d) {
-    const hit = S.running ? null : hitAt(e.clientX);
+    const hit = freeHit(e.clientX);
     ui.bar.style.cursor = !hit ? 'pointer' : hit.part === 'body' ? 'grab' : 'ew-resize';
     return;
   }
@@ -781,7 +800,7 @@ ui.bar.addEventListener('pointermove', e => {
     syncTimes(d.hit.c);
     renderRegions();
     renderMerge();
-  } else if (!S.running) {
+  } else {
     const t0 = Math.round(d.t0);
     d.preview = [Math.min(t0, t), Math.max(t0, t)];
     renderRegions();
@@ -863,7 +882,7 @@ ui.clips.addEventListener('click', e => {
 
 ui.clips.addEventListener('contextmenu', e => {
   const c = clipById(Number(e.target.closest('.clip')?.dataset.id));
-  if (!c || S.running || e.target.closest('input')) return;
+  if (!c || inJob(c) || e.target.closest('input')) return;
   e.preventDefault();
   clipMenu(e.clientX, e.clientY, c);
 });
@@ -1126,7 +1145,7 @@ async function startCut() {
   if (S.running) return;
   const row = c => {
     const s = srcById(c.src);
-    return { id: c.id, url: s.url, full: c.full, start: c.start, end: c.end, name: c.name.trim(), length: clipLen(c) };
+    return { id: c.id, url: s.url, live: s.live || '', full: c.full, start: c.start, end: c.end, name: c.name.trim(), length: clipLen(c) };
   };
   // Merging cuts in the merged file's order; otherwise Space by Space
   const rows = S.join
@@ -1208,7 +1227,7 @@ listen('job-done', ({ payload }) => {
 
 /** A clip that changes after a cut loses its tick (or its error). */
 function touched(c) {
-  if (S.running || !c || c.status === 'Pending') return;
+  if (!c || inJob(c) || c.status === 'Pending') return;
   c.status = 'Pending';
   syncStatus(c);
   if (!S.clips.some(x => x.status !== 'Pending')) setStatus('');
@@ -1489,6 +1508,24 @@ async function init() {
   if (!S.env.ffmpeg) setStatus('FFmpeg not found', 'bad');
   kick();
   pollLoop();
+  setTimeout(checkUpdate, 3000);
+}
+
+/** When a newer version is out: a tag at the top, its dot in a colour of its
+ *  own for each version. Nothing otherwise. */
+async function checkUpdate() {
+  const u = await invoke('check_update').catch(() => null);
+  if (!u) return;
+  const box = $('#update');
+  const name = u.version.replace(/^v/i, '').replace(/\.0$/, '');
+  const [major = 0, minor = 0, patch = 0] = name.split('.').map(Number);
+  box.style.setProperty('--uc', COLORS[(major * 3 + minor + patch) % COLORS.length][0]);
+  $('.upd-open', box).textContent = `Update ${name}`;
+  $('.upd-open', box).title = `Space Cutter ${name} is out: open its download page`;
+  $('.upd-open', box).onclick = () => invoke('open_update', { url: u.url }).catch(() => {});
+  $('.upd-close', box).innerHTML = ICON.close;
+  $('.upd-close', box).onclick = () => { box.classList.add('hidden'); invoke('dismiss_update', { version: u.version }); };
+  box.classList.remove('hidden');
 }
 
 init();

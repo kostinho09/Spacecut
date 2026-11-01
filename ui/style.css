@@ -138,58 +138,46 @@ svg { display: block; }
 html.windows .top { padding-left: 18px; }
 .brand { display: inline-flex; align-items: center; gap: 8px; flex: none; font-weight: 700; font-size: 15px; white-space: nowrap; }
 
-/* The three dots of the icon: still beside the name, lighting up one by one while clips download */
+/* The three dots of the icon: still beside the scissors, moving while it works */
 .dots { display: inline-flex; align-items: center; gap: 4px; }
 .dots i { width: 6px; height: 6px; border-radius: 50%; background: #f2a93b; }
 .dots i:nth-child(2) { background: #3bbf95; }
 .dots i:nth-child(3) { background: #8c84e8; }
 .st .dots i { width: 7px; height: 7px; }
 .st .dots { gap: 5px; }
-/* In the clip being cut the dots add up: yellow, then yellow and green, then
-   all three, then none. A dot that is not lit is not there at all. */
-.st .dots i { opacity: 0; animation: count1 2.8s ease-in-out infinite; }
-.st .dots i:nth-child(2) { animation-name: count2; }
-.st .dots i:nth-child(3) { animation-name: count3; }
-@keyframes count1 { 0% { opacity: 0; } 4%, 72% { opacity: 1; } 76%, 100% { opacity: 0; } }
-@keyframes count2 { 0%, 25% { opacity: 0; } 29%, 72% { opacity: 1; } 76%, 100% { opacity: 0; } }
-@keyframes count3 { 0%, 50% { opacity: 0; } 54%, 72% { opacity: 1; } 76%, 100% { opacity: 0; } }
+/* In the clip being cut each dot turns into a rounded square, spins a quarter
+   turn and rounds off again, one after another */
+.st .dots i { animation: cube 1.8s ease-in-out infinite; }
+.st .dots i:nth-child(2) { animation-delay: .2s; }
+.st .dots i:nth-child(3) { animation-delay: .4s; }
+.st .dots.wait i { animation: none; opacity: .32; }
+@keyframes cube {
+  0%, 45%, 100% { border-radius: 50%; transform: rotate(0) scale(1); }
+  15%, 25% { border-radius: 22%; transform: rotate(90deg) scale(1.35); }
+}
 
-/* The logo: the icon's scissors and its dots. While clips download the dots
-   keep a steady 4/4 beat, one step per beat: yellow, then green beside it,
-   then purple; the two outer dots slide diagonally into a column (purple on
-   top), then on to the other side; purple alone, then green, then yellow; and
-   the same way back. Dots that are not lit are not there at all. */
+/* The logo: the icon's scissors and its dots. While a Space plays the dots
+   become the bars of a sound meter. */
 .mark-logo { display: inline-flex; align-items: center; gap: 6px; }
 .logo-scis svg { display: block; width: 19px; height: 19px; color: var(--fg); }
-body.cutting .logo i { animation: logo-y 7s ease-in-out infinite; }
-body.cutting .logo i:nth-child(2) { animation-name: logo-g; }
-body.cutting .logo i:nth-child(3) { animation-name: logo-p; }
-/* Ten beats of 0.7 s, 10% each; a dot is 10px from the next */
-@keyframes logo-y { /* yellow: starts on the left */
-  0%, 30% { transform: translate(0, 0); }
-  36%, 40% { transform: translate(10px, 10px); }
-  46%, 80% { transform: translate(20px, 0); }
-  86%, 90% { transform: translate(10px, -10px); }
-  96%, 100% { transform: translate(0, 0); }
-  0%, 50% { opacity: 1; } 52%, 70% { opacity: 0; } 72%, 100% { opacity: 1; }
-}
-@keyframes logo-g { /* green: stays in the middle */
-  0% { opacity: 1; } 2%, 10% { opacity: 0; } 12%, 50% { opacity: 1; }
-  52%, 60% { opacity: 0; } 62%, 100% { opacity: 1; }
-}
-@keyframes logo-p { /* purple: starts on the right */
-  0%, 30% { transform: translate(0, 0); }
-  36%, 40% { transform: translate(-10px, -10px); }
-  46%, 80% { transform: translate(-20px, 0); }
-  86%, 90% { transform: translate(-10px, 10px); }
-  96%, 100% { transform: translate(0, 0); }
-  0% { opacity: 1; } 2%, 20% { opacity: 0; } 22%, 100% { opacity: 1; }
-}
-#mark .scis { width: 16px; height: 16px; }
+body.playing .logo i { border-radius: 3px; animation: eq1 1.1s ease-in-out infinite; }
+body.playing .logo i:nth-child(2) { animation: eq2 .9s ease-in-out infinite; }
+body.playing .logo i:nth-child(3) { animation: eq3 1.3s ease-in-out infinite; }
+@keyframes eq1 { 0%, 100% { height: 6px; } 30% { height: 18px; } 60% { height: 10px; } 80% { height: 14px; } }
+@keyframes eq2 { 0%, 100% { height: 13px; } 40% { height: 6px; } 70% { height: 18px; } }
+@keyframes eq3 { 0%, 100% { height: 8px; } 25% { height: 16px; } 55% { height: 6px; } 80% { height: 18px; } }
 .help { flex: none; padding: 0 8px; background: transparent; color: var(--chipfg); white-space: nowrap; }
 .help:hover { background: var(--chip); color: var(--fg); }
 @media (max-width: 520px) { .help { display: none; } }
 .mode { display: inline-flex; padding: 3px; border-radius: 999px; background: var(--chip); }
+/* A newer version is out: a plain tag with a dot in that version's colour,
+   which opens its page, and an x to hide it */
+.update { display: inline-flex; align-items: center; flex: none; height: 26px; padding: 0 3px 0 10px; border-radius: 999px; background: var(--chip); font-size: 12px; font-weight: 700; white-space: nowrap; }
+.upd-open { display: inline-flex; align-items: center; gap: 6px; color: var(--fg); }
+.upd-open::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--uc); }
+.upd-close { width: 20px; height: 20px; margin-left: 4px; border-radius: 50%; display: grid; place-items: center; color: var(--mu); }
+.upd-close:hover { background: var(--hover); color: var(--fg); }
+.upd-close svg { width: 10px; height: 10px; }
 .mode button { width: 29px; height: 26px; border-radius: 999px; display: grid; place-items: center; color: var(--chipfg); }
 .mode button svg { width: 15px; height: 15px; }
 .mode button.on { background: var(--knob); color: var(--fg); box-shadow: 0 1px 2px var(--shade); }
@@ -278,11 +266,11 @@ main { flex: 1; overflow-y: auto; padding: 4px 18px 10px; }
 .snapline { position: absolute; top: 1px; height: 32px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--fg); pointer-events: none; z-index: 1; }
 
 .markrow { display: flex; align-items: center; gap: 12px; }
-/* While marking, the button keeps its usual look, with a blinking red dot
+/* While marking, the button keeps its usual look, with a blinking red ring
    and the clip's length so far */
-#mark .rec { width: 9px; height: 9px; border-radius: 50%; background: #e5484d; animation: rec 1.2s ease-in-out infinite; }
+#mark.rec { animation: rec 1.2s ease-in-out infinite; }
 #mark .rec-len { font-variant-numeric: tabular-nums; }
-@keyframes rec { 50% { opacity: .15; } }
+@keyframes rec { 0%, 100% { box-shadow: 0 0 0 2px #e5484d; } 50% { box-shadow: 0 0 0 2px rgba(229, 72, 77, .12); } }
 .msg { flex: 1; min-width: 0; font-size: 12.5px; color: var(--mu); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .msg.bad { color: var(--red); }
 

@@ -42,6 +42,10 @@ pub struct Row {
     /// Seconds, when the window knows it; used to show steady progress.
     #[serde(default)]
     pub length: f64,
+    /// The Space's dynamic link, if it came from one: where to find its
+    /// pieces should the replay not give them out.
+    #[serde(default)]
+    pub live: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -141,6 +145,10 @@ pub(crate) fn run_job(emit: Emit, ffmpeg: Option<PathBuf>, ctl: &Control, job: &
     }
 }
 
+fn live_of(row: &Row) -> Option<&str> {
+    Some(row.live.trim()).filter(|l| !l.is_empty())
+}
+
 /// How long a row's clip is: its span, or the whole recording for "Full".
 fn length_of(ffmpeg: &Path, row: &Row) -> f64 {
     if row.length > 0.0 {
@@ -154,7 +162,7 @@ fn length_of(ffmpeg: &Path, row: &Row) -> f64 {
     }
     let url = row.url.trim();
     if hls::is_m3u8(url) {
-        hls::load_playlist(url).map(|p| p.duration).unwrap_or(0.0)
+        hls::resolve(url, live_of(row)).map(|p| p.duration).unwrap_or(0.0)
     } else {
         ffmpeg::probe_duration(ffmpeg, url).unwrap_or(0.0)
     }
@@ -380,15 +388,30 @@ impl Worker<'_> {
         }
 
         // A Space (or a local .m4a/.ts/.aac): copy through an MPEG-TS file
+        let space = (!local && hls::is_m3u8(url)).then(|| hls::resolve(url, live_of(row)).ok()).flatten();
         let mut trim: Option<(PathBuf, f64)> = None;
         let cut = match span {
-            None => args!["-i", url, "-c", "copy", "-f", "mpegts", "-y", &ts],
+            // Pieces from elsewhere than the list says need a list of their own
+            None => match &space {
+                Some(list) if list.moved => {
+                    trim = hls::trim_playlist(&list.segments, 0.0, list.duration);
+                    match &trim {
+                        Some((own, _)) => {
+                            let mut a: Vec<String> = HLS_PROTOCOLS.iter().map(|s| s.to_string()).collect();
+                            a.extend(args!["-i", path_str(own), "-c", "copy", "-f", "mpegts", "-y", &ts]);
+                            a
+                        }
+                        None => args!["-i", url, "-c", "copy", "-f", "mpegts", "-y", &ts],
+                    }
+                }
+                _ => args!["-i", url, "-c", "copy", "-f", "mpegts", "-y", &ts],
+            },
             Some((s0, e0)) => {
                 let dur = (e0 - s0).to_string();
                 if local {
                     args!["-ss", fmt_hms(s0), "-i", url, "-t", dur, "-c", "copy", "-avoid_negative_ts", "1", "-f", "mpegts", "-y", &ts]
                 } else {
-                    trim = hls::trim_playlist(url, s0 as f64, e0 as f64);
+                    trim = space.as_ref().and_then(|list| hls::trim_playlist(&list.segments, s0 as f64, e0 as f64));
                     match &trim {
                         Some((list, offset)) => {
                             let mut a: Vec<String> = HLS_PROTOCOLS.iter().map(|s| s.to_string()).collect();
@@ -552,7 +575,7 @@ mod tests {
     use std::sync::Mutex;
 
     fn row(id: u64, url: &str, start: &str, end: &str, name: &str) -> Row {
-        Row { id, url: url.into(), full: false, start: start.into(), end: end.into(), name: name.into(), length: 0.0 }
+        Row { id, url: url.into(), full: false, start: start.into(), end: end.into(), name: name.into(), length: 0.0, live: String::new() }
     }
 
     fn run(job: &Job) -> Vec<String> {
@@ -608,6 +631,60 @@ mod tests {
         println!("local cut = {cut:.2} s");
         let _ = fs::remove_dir_all(&dir);
         assert!((cut - 5.0).abs() < 0.5);
+    }
+
+    /// What the app does with a Space's dynamic link: convert it, then cut
+    /// 20 seconds, with the link kept for finding the pieces:
+    /// DYNAMIC_URL='https://…/dynamic_playlist.m3u8?type=live' cargo test -- --ignored cuts_a_space_from
+    #[test]
+    #[ignore]
+    fn cuts_a_space_from_its_dynamic_link() {
+        let dynamic = std::env::var("DYNAMIC_URL").expect("set DYNAMIC_URL");
+        let replay = hls::live_to_replay(&dynamic).unwrap();
+        println!("converted: {replay}");
+        let dir = std::env::temp_dir().join(format!("spacecutter_dyn_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut clip = row(1, &replay, "00:10:00", "00:10:20", "from-dynamic");
+        clip.live = dynamic;
+        let events = run(&Job { rows: vec![clip], output_folder: path_str(&dir), merge: false, merge_name: String::new(), keep_clips: true, jingles: HashMap::new() });
+        println!("{events:#?}");
+        let got = length(&dir.join("from-dynamic.m4a"));
+        println!("cut: {got:.2} s (want 20)");
+        let _ = fs::remove_dir_all(&dir);
+        assert!((got - 20.0).abs() < 0.5);
+    }
+
+    /// A replay whose list opens but whose pieces the server refuses (the
+    /// master's own path, with its key) is still cut, from where else the
+    /// pieces are (see `hls::resolve`):
+    /// DYNAMIC_URL='https://…/dynamic_playlist.m3u8?type=live' cargo test -- --ignored cuts_when
+    #[test]
+    #[ignore]
+    fn cuts_when_the_given_replay_refuses_its_pieces() {
+        let dynamic = std::env::var("DYNAMIC_URL").expect("set DYNAMIC_URL");
+        let master = dynamic.replace("/dynamic_playlist.m3u8?type=live", "/master_playlist.m3u8");
+        let text = hls::get_text(&master).unwrap();
+        let refused = url::Url::parse(&master).unwrap().join(text.lines().find(|l| l.starts_with('/')).unwrap().trim()).unwrap().to_string();
+        let dir = std::env::temp_dir().join(format!("spacecutter_live_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut clip = row(1, &refused, "00:10:00", "00:10:20", "elsewhere");
+        clip.live = dynamic.clone();
+        let mut whole = row(2, &refused, "", "", "whole-elsewhere");
+        whole.live = dynamic;
+        whole.full = std::env::var("WITH_FULL").is_ok();
+        let mut rows = vec![clip];
+        if whole.full {
+            rows.push(whole);
+        }
+        let events = run(&Job { rows, output_folder: path_str(&dir), merge: false, merge_name: String::new(), keep_clips: true, jingles: HashMap::new() });
+        println!("{events:#?}");
+        let got = length(&dir.join("elsewhere.m4a"));
+        println!("cut from elsewhere: {got:.2} s (want 20)");
+        if dir.join("whole-elsewhere.m4a").exists() {
+            println!("whole Space from elsewhere: {:.1} s", length(&dir.join("whole-elsewhere.m4a")));
+        }
+        let _ = fs::remove_dir_all(&dir);
+        assert!((got - 20.0).abs() < 0.5);
     }
 
     /// This Space's timestamps wrap at about 00:52:03; a clip across that point
