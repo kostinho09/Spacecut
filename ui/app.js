@@ -478,7 +478,7 @@ function flash(text, kind = '') {
 function renderMsg() {
   if (S.msgTimer) return;
   const p = S.p;
-  let t = 'Paste a Space link at the top to start';
+  let t = 'Paste a dynamic link at the top to start';
   let k = '';
   if (p.error) { t = p.error; k = 'bad'; }
   else if (p.loading) t = 'Loading…';
@@ -1421,8 +1421,7 @@ Save the <strong>Dynamic link</strong> in a note while the Space is live, so you
 Already have a <strong>Replay link</strong> (<code>…playlist_….m3u8?type=replay</code>)? Paste it directly. There's nothing to convert.`,
   app: `<b>Add a Space</b>Paste a <strong>Dynamic link</strong> or <strong>Replay link</strong> into the field at the top. Each Space gets its own coloured tag. Click the <strong>Copy</strong> icon inside a tag to copy its Replay link, whether you want to listen to the Space in your browser or share it with others. Right-click a tag to rename it, add the entire Space as a single clip, or remove it.
 
-<b>Why Add a File?</b>Many people already have screen recordings of Spaces saved as video files. SpaceCutter makes it easy to convert them into <code>.m4a</code> audio files.
-<strong>Merge All Clips</strong> lets you combine clips from the same Space, different Spaces, or even older clips you've previously saved with SpaceCutter into one continuous audio file.
+<b>Why Add a File?</b>Many people already have screen recordings of Spaces saved as video files. SpaceCutter makes it easy to convert them into <code>.m4a</code> audio files. <strong>Merge</strong> lets you combine clips from the same Space, different Spaces, or even older clips you've previously saved, with or without SpaceCutter, into one continuous audio file.
 You can also add, save, and preview your favourite sound effects to use between clips, making your final audio more playful and engaging.
 
 <b>Mark What to Cut</b>Press <strong>Mark Start</strong> and <strong>Mark End</strong> while listening, or simply drag across the bar to select the exact section you want to cut.

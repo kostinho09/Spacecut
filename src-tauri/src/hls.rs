@@ -149,7 +149,12 @@ pub fn trim_playlist(segments: &[Segment], s0: f64, e0: f64) -> Option<(PathBuf,
 /// a Space the others still give out (prod-fastly-eu-central-1 did).
 const OTHER_HOSTS: [&str; 2] = ["prod-fastly-a.video.pscp.tv", "prod-fastly-p.video.pscp.tv"];
 
-/// A link, then the same on X's other servers.
+/// A server asked last even for its own links: for its Spaces of 27 Oct to
+/// 1 Nov 2026 it refused the master and the replay (400) and took 5–10 s to
+/// fail on pdxa (503), while the other servers gave out both.
+const LAST_HOST: &str = "prod-fastly-eu-central-1.video.pscp.tv";
+
+/// A link, then the same on X's other servers; one on `LAST_HOST` goes last.
 fn on_hosts(url: &str) -> Vec<String> {
     let mut out = vec![url.to_string()];
     if let Ok(parsed) = url::Url::parse(url) {
@@ -159,6 +164,9 @@ fn on_hosts(url: &str) -> Vec<String> {
                 if other.set_host(Some(host)).is_ok() && !out.contains(&other.to_string()) {
                     out.push(other.to_string());
                 }
+            }
+            if parsed.host_str() == Some(LAST_HOST) {
+                out.rotate_left(1);
             }
         }
     }
@@ -395,7 +403,7 @@ mod tests {
         let dynamic = std::env::var("DYNAMIC_URL").expect("set DYNAMIC_URL");
         let t = std::time::Instant::now();
         let replay = live_to_replay(&dynamic).unwrap();
-        println!("convert: {:.2} s", t.elapsed().as_secs_f64());
+        println!("convert: {:.2} s, to {replay}", t.elapsed().as_secs_f64());
         let t = std::time::Instant::now();
         let list = resolve(&replay, Some(&dynamic)).unwrap();
         println!("player load right after: {:.3} s, {} pieces", t.elapsed().as_secs_f64(), list.segments.len());
@@ -438,6 +446,17 @@ mod tests {
         let archive = archive_of(&dynamic).unwrap();
         assert!(archive.starts_with("https://prod-fastly-a.video.pscp.tv/Transcoding/v1/hls/KEY/non_transcode/pdxa/periscope-replays-public/audio-space/playlist_"));
         assert!(archive.ends_with(".m3u8?type=replay") && archive != archive_of(&dynamic).unwrap());
+    }
+
+    /// prod-fastly-eu-central-1 refused its own Spaces (VthB, oZn48, y5nElS)
+    /// and was slow to: its links are tried on the other servers first.
+    #[test]
+    fn asks_eu_central_last() {
+        let dynamic = "https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/KEY/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/audio-space/dynamic_playlist.m3u8?type=live";
+        let hosts = on_hosts(dynamic);
+        let names: Vec<&str> = hosts.iter().map(|u| u.split('/').nth(2).unwrap()).collect();
+        assert_eq!(names, ["prod-fastly-a.video.pscp.tv", "prod-fastly-p.video.pscp.tv", "prod-fastly-eu-central-1.video.pscp.tv"]);
+        assert!(hosts.iter().all(|u| u.ends_with("/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/audio-space/dynamic_playlist.m3u8?type=live")));
     }
 
     #[test]
