@@ -43,11 +43,14 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
 #[tauri::command]
 fn env_info(app: AppHandle, state: State<AppState>) -> Env {
     let p = prefs::load();
+    // Only a folder the user chose (and that is still there): nothing is
+    // saved anywhere by default, so the Mac never asks to let the app in
     let output_folder = p
         .get("output_folder")
         .and_then(Value::as_str)
-        .map(String::from)
-        .unwrap_or_else(|| util::path_str(&util::desktop_dir()));
+        .filter(|f| std::path::Path::new(f).is_dir())
+        .unwrap_or_default()
+        .to_string();
     Env {
         platform: if cfg!(target_os = "macos") { "macos" } else if cfg!(windows) { "windows" } else { "linux" },
         version: app.package_info().version.to_string(),
@@ -200,6 +203,59 @@ fn open_update(url: String) -> Result<(), String> {
     update::open(&url)
 }
 
+#[cfg(target_os = "macos")]
+const CHECK_UPDATES: &str = "check_updates";
+
+/// "Check for Updates…" under "About" in the Mac's menu bar, in the menu
+/// Tauri gives a Mac app anyway.
+#[cfg(target_os = "macos")]
+fn add_update_item(app: &AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem, MenuItemKind};
+    let menu = Menu::default(app)?;
+    if let Some(MenuItemKind::Submenu(app_menu)) = menu.items()?.into_iter().next() {
+        app_menu.insert(&MenuItem::with_id(app, CHECK_UPDATES, "Check for Updates…", true, None::<&str>)?, 1)?;
+    }
+    app.set_menu(menu)?;
+    app.on_menu_event(|app, event| {
+        if event.id().as_ref() == CHECK_UPDATES {
+            let app = app.clone();
+            std::thread::spawn(move || tell_about_updates(&app));
+        }
+    });
+    Ok(())
+}
+
+/// Asks GitHub now and says what it found in a small window of its own.
+#[cfg(target_os = "macos")]
+fn tell_about_updates(app: &AppHandle) {
+    use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogKind};
+    let current = app.package_info().version.to_string();
+    match update::check_now(&current) {
+        update::Found::Newer(found) => app
+            .dialog()
+            .message(format!("Space Cutter {} is out. You have {current}.", found.version.trim_start_matches(['v', 'V'])))
+            .title("A new version is available")
+            .buttons(MessageDialogButtons::OkCancelCustom("Download".into(), "Later".into()))
+            .show(move |download| {
+                if download {
+                    let _ = update::open(&found.url);
+                }
+            }),
+        update::Found::UpToDate => app
+            .dialog()
+            .message(format!("Space Cutter {current} is the newest version."))
+            .title("You're up to date")
+            .kind(MessageDialogKind::Info)
+            .show(|_| {}),
+        update::Found::NoAnswer => app
+            .dialog()
+            .message("Space Cutter couldn't reach GitHub. Check your internet connection and try again.")
+            .title("Couldn't check for updates")
+            .kind(MessageDialogKind::Warning)
+            .show(|_| {}),
+    }
+}
+
 /// Says the cut is over, unless the user is already looking at the window.
 #[tauri::command]
 fn notify_done(app: AppHandle, window: tauri::Window, body: String) {
@@ -221,6 +277,8 @@ fn main() {
                 job: Arc::new(cutter::Control::default()),
                 ffmpeg,
             });
+            #[cfg(target_os = "macos")]
+            add_update_item(app.handle())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

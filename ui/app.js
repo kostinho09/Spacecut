@@ -427,8 +427,18 @@ function renderFolder() {
   const f = S.env.output_folder;
   const b = $('#folder');
   b.innerHTML = ICON.folder;
-  b.append(h('span', {}, baseName(f.replace(/[\\/]+$/, '')) || f));
-  b.title = `Saves to ${f}`;
+  b.append(h('span', {}, f ? baseName(f.replace(/[\\/]+$/, '')) || f : 'Choose folder'));
+  b.title = f ? `Saves to ${f}` : 'Choose where to save the clips';
+}
+
+/** The folder the user picks; false if they cancel. */
+async function chooseFolder() {
+  const f = await invoke('pick_folder').catch(() => null);
+  if (!f) return false;
+  S.env.output_folder = f;
+  savePref('output_folder', f);
+  renderFolder();
+  return true;
 }
 
 /* ── Player ─────────────────────────────────────────── */
@@ -1152,8 +1162,10 @@ async function startCut() {
     ? mergeClips().map(row)
     : S.sources.flatMap(s => clipsOf(s.id).filter(usable)).map(row);
   if (!rows.length) return;
-  S.clips.forEach(c => { c.status = 'Pending'; });
   if (!S.env.ffmpeg) { setStatus('FFmpeg not found', 'bad'); return; }
+  // Nothing is saved anywhere the user hasn't chosen
+  if (!S.env.output_folder && !(await chooseFolder())) return;
+  S.clips.forEach(c => { c.status = 'Pending'; });
   const jingles = {};
   if (S.join) {
     jingles.j_before = S.gaps.before;
@@ -1236,13 +1248,7 @@ function touched(c) {
 $('#cut').addEventListener('click', startCut);
 $('#cancel').addEventListener('click', cancelCut);
 
-$('#folder').addEventListener('click', async () => {
-  const f = await invoke('pick_folder').catch(() => null);
-  if (!f) return;
-  S.env.output_folder = f;
-  savePref('output_folder', f);
-  renderFolder();
-});
+$('#folder').addEventListener('click', chooseFolder);
 
 /* ── Source field, transport ────────────────────────── */
 

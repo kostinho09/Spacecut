@@ -50,15 +50,44 @@ fn latest_release() -> Option<String> {
     tag.chars().all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c)).then(|| tag.to_string())
 }
 
+fn release_url(tag: &str) -> String {
+    format!("https://github.com/{REPO}/releases/tag/{tag}")
+}
+
 /// What to tell the user, from the settings: a release newer than `current`
 /// that they have not hidden.
 fn decide(prefs: &Map<String, Value>, current: &str) -> Option<Update> {
     let latest = prefs.get("update_latest")?.as_str()?;
     let dismissed = prefs.get("update_dismissed").and_then(Value::as_str);
-    (numbers(latest)? > numbers(current)? && dismissed != Some(latest)).then(|| Update {
-        version: latest.to_string(),
-        url: format!("https://github.com/{REPO}/releases/tag/{latest}"),
-    })
+    (numbers(latest)? > numbers(current)? && dismissed != Some(latest)).then(|| Update { version: latest.to_string(), url: release_url(latest) })
+}
+
+/// What "Check for Updates…" in the menu found.
+#[derive(Debug, PartialEq)]
+pub enum Found {
+    Newer(Update),
+    UpToDate,
+    /// GitHub didn't answer (no internet, say).
+    NoAnswer,
+}
+
+/// Asks GitHub now, whatever the last check found or the user hid, and
+/// keeps the answer for the window's own daily check.
+pub fn check_now(current: &str) -> Found {
+    let latest = latest_release();
+    if let Some(tag) = &latest {
+        prefs::set("update_latest", json!(tag));
+        prefs::set("update_checked", json!(now()));
+    }
+    compare(latest, current)
+}
+
+fn compare(latest: Option<String>, current: &str) -> Found {
+    let Some(tag) = latest else { return Found::NoAnswer };
+    match (numbers(&tag), numbers(current)) {
+        (Some(theirs), Some(ours)) if theirs > ours => Found::Newer(Update { url: release_url(&tag), version: tag }),
+        _ => Found::UpToDate,
+    }
 }
 
 /// A newer version to point the user to, if there is one.
@@ -127,6 +156,15 @@ mod tests {
         assert_eq!(decide(&prefs("v2.1.0", Some("v2.1.0")), "2.0.0"), None, "hidden");
         assert!(decide(&prefs("v2.2.0", Some("v2.1.0")), "2.0.0").is_some(), "a later one shows again");
         assert_eq!(decide(&Map::new(), "2.0.0"), None, "never checked");
+    }
+
+    #[test]
+    fn the_menu_tells_what_it_found_even_if_hidden() {
+        let newer = Update { version: "v2.1.0".into(), url: "https://github.com/kostinho09/SpaceCutter/releases/tag/v2.1.0".into() };
+        assert_eq!(compare(Some("v2.1.0".into()), "2.0.0"), Found::Newer(newer));
+        assert_eq!(compare(Some("v1.1.1".into()), "2.0.0"), Found::UpToDate, "the newest release is older");
+        assert_eq!(compare(Some("v2.0.0".into()), "2.0.0"), Found::UpToDate);
+        assert_eq!(compare(None, "2.0.0"), Found::NoAnswer);
     }
 
     /// Needs the network.

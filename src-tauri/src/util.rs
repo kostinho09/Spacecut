@@ -5,10 +5,6 @@ pub fn home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
-pub fn desktop_dir() -> PathBuf {
-    dirs::desktop_dir().unwrap_or_else(home_dir)
-}
-
 /// Keeps a console window from flashing up for every ffmpeg run on Windows.
 pub fn quiet(cmd: &mut Command) -> &mut Command {
     #[cfg(windows)]
