@@ -1,4 +1,3 @@
-use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
@@ -7,12 +6,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use regex::Regex;
 
-fn agent() -> &'static ureq::Agent {
+pub(crate) fn agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
         ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(20))
             .user_agent("Mozilla/5.0")
+            // Kept open for the next pieces, one for each fetched at a time
+            .max_idle_connections_per_host(crate::fetch::PARALLEL + 2)
             .build()
     })
 }
@@ -24,13 +25,6 @@ pub fn get_text(url: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())?
         .into_string()
         .map_err(|e| e.to_string())
-}
-
-pub fn get_bytes(url: &str) -> Result<Vec<u8>, String> {
-    let resp = agent().get(url).call().map_err(|e| e.to_string())?;
-    let mut bytes = Vec::new();
-    resp.into_reader().take(64 << 20).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-    Ok(bytes)
 }
 
 pub fn is_m3u8(url: &str) -> bool {
@@ -391,9 +385,66 @@ pub fn strip_id3(mut b: &[u8]) -> &[u8] {
     b
 }
 
+/// The ADTS frames of a piece of AAC that start within its first `secs`, so
+/// a clip's last piece stops where the clip does. The whole piece if it
+/// doesn't read as ADTS.
+pub fn adts_until(b: &[u8], secs: f64) -> &[u8] {
+    const RATES: [f64; 13] = [96000.0, 88200.0, 64000.0, 48000.0, 44100.0, 32000.0, 24000.0, 22050.0, 16000.0, 12000.0, 11025.0, 8000.0, 7350.0];
+    let (mut pos, mut t) = (0, 0.0);
+    while t < secs && pos < b.len() {
+        let h = &b[pos..];
+        // Newer Spaces carry ID3 tags between their frames too
+        if h.len() >= 10 && &h[..3] == b"ID3" {
+            let size = (h[6] as usize & 0x7f) << 21 | (h[7] as usize & 0x7f) << 14 | (h[8] as usize & 0x7f) << 7 | (h[9] as usize & 0x7f);
+            pos += 10 + size + if h[5] & 0x10 != 0 { 10 } else { 0 };
+            continue;
+        }
+        if h.len() < 7 || h[0] != 0xff || h[1] & 0xf0 != 0xf0 {
+            return b;
+        }
+        let Some(rate) = RATES.get(((h[2] >> 2) & 0xf) as usize) else { return b };
+        let len = (h[3] as usize & 0x3) << 11 | (h[4] as usize) << 3 | (h[5] as usize) >> 5;
+        if len < 7 || len > h.len() {
+            return b;
+        }
+        pos += len;
+        t += ((h[6] & 0x3) as f64 + 1.0) * 1024.0 / rate;
+    }
+    &b[..pos.min(b.len())]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `n` frames of AAC as a Space has them: ADTS, 48 kHz, stereo, with an
+    /// ID3 tag between some of them, as newer Spaces have.
+    fn adts(n: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        for i in 0..n {
+            if i % 3 == 1 {
+                out.extend(b"ID3\x04\x00\x00\x00\x00\x00\x1a");
+                out.extend([0x54; 0x1a]);
+            }
+            let len = 7 + 20 + i;
+            out.extend([0xff, 0xf1, 0x4c, 0x80 | (len >> 11) as u8, (len >> 3) as u8, ((len & 7) << 5) as u8 | 0x1f, 0xfc]);
+            out.extend(std::iter::repeat_n(i as u8, len - 7));
+        }
+        out
+    }
+
+    #[test]
+    fn keeps_the_frames_that_start_in_time() {
+        let piece = adts(10);
+        let frame = 1024.0 / 48000.0;
+        let frames = |b: &[u8]| (0..10).filter(|&i| b.ends_with(&[i as u8; 20])).max().map_or(0, |i| i + 1);
+        assert_eq!(frames(adts_until(&piece, 2.5 * frame)), 3, "the frame under the end is kept");
+        assert_eq!(frames(adts_until(&piece, 0.5 * frame)), 1);
+        assert_eq!(frames(adts_until(&piece, 7.5 * frame)), 8);
+        assert_eq!(adts_until(&piece, 1.0), &piece[..], "all of it");
+        assert_eq!(adts_until(&piece, 0.0), &[] as &[u8]);
+        assert_eq!(adts_until(b"not adts at all", 0.01), b"not adts at all");
+    }
 
     /// How long each step takes on a real Space:
     /// DYNAMIC_URL='https://…/dynamic_playlist.m3u8?type=live' cargo test -- --ignored --nocapture times_

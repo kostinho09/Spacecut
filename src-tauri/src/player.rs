@@ -1,8 +1,9 @@
 //! Listening to a Space (or a file) inside the app.
 //!
 //! A Space replay is a list of ~3 s AAC segments. Playback fetches them from
-//! the one under the playhead onward, strips their ID3 headers and pipes the
-//! raw AAC into ffmpeg, which hands back PCM for the speaker. Feeding the
+//! the one under the playhead onward, a few at a time (see `fetch`), strips
+//! their ID3 headers and pipes the raw AAC into ffmpeg, in order, which hands
+//! back PCM for the speaker. Feeding the
 //! segments ourselves keeps ffmpeg away from the stream timestamps, so the
 //! MPEG-TS wrap that breaks seeking in long Spaces never reaches it, and the
 //! playhead sits on the same #EXTINF timeline the cuts use.
@@ -21,6 +22,7 @@ use cpal::{FromSample, Sample, SizedSample};
 use serde::Serialize;
 
 use crate::ffmpeg;
+use crate::fetch;
 use crate::hls::{self, Segment};
 use crate::util::quiet;
 
@@ -493,16 +495,10 @@ fn decode(
         (Some((segments, first)), Some(mut pipe)) => {
             let sh = sh.clone();
             Some(thread::spawn(move || -> Result<(), String> {
-                for seg in &segments[first..] {
-                    if sh.gen.load(Relaxed) != gen {
-                        break;
-                    }
-                    let bytes = fetch(&seg.url, &sh, gen)?;
-                    if pipe.write_all(hls::strip_id3(&bytes)).is_err() {
-                        break;
-                    }
-                }
-                Ok(())
+                // A few pieces ahead are fetched at once, so a slow one doesn't hold up the sound
+                let urls = segments[first..].iter().map(|s| s.url.clone()).collect();
+                fetch::in_order(urls, fetch::AHEAD_PLAY, move || sh.gen.load(Relaxed) != gen, |_, piece| pipe.write_all(piece).is_ok())
+                    .map_err(|e| format!("Could not load the audio ({e})"))
             }))
         }
         _ => None,
@@ -565,21 +561,6 @@ fn decode(
         return Err(if last.is_empty() { "Could not play this source".into() } else { last.to_string() });
     }
     Ok(())
-}
-
-fn fetch(url: &str, sh: &Shared, gen: u64) -> Result<Vec<u8>, String> {
-    let mut last = String::new();
-    for attempt in 1..=4u64 {
-        match hls::get_bytes(url) {
-            Ok(bytes) => return Ok(bytes),
-            Err(e) => last = e,
-        }
-        if sh.gen.load(Relaxed) != gen {
-            return Ok(Vec::new());
-        }
-        thread::sleep(Duration::from_millis(500 * attempt));
-    }
-    Err(format!("Could not load the audio ({last})"))
 }
 
 #[cfg(test)]

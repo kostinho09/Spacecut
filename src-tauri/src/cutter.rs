@@ -4,6 +4,7 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -15,6 +16,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 
+use crate::fetch;
 use crate::ffmpeg::{self, Slot};
 use crate::hls;
 use crate::util::{clean_name, fmt_hms, parse_hms, path_str};
@@ -149,6 +151,16 @@ fn live_of(row: &Row) -> Option<&str> {
     Some(row.live.trim()).filter(|l| !l.is_empty())
 }
 
+/// Whether a Space is cut from its pieces fetched several at a time; tests
+/// turn it off to compare with ffmpeg reading the list itself.
+fn in_parallel() -> bool {
+    #[cfg(test)]
+    let on = tests::PARALLEL.with(Cell::get);
+    #[cfg(not(test))]
+    let on = true;
+    on
+}
+
 /// How long a row's clip is: its span, or the whole recording for "Full".
 fn length_of(ffmpeg: &Path, row: &Row) -> f64 {
     if row.length > 0.0 {
@@ -279,9 +291,10 @@ impl Worker<'_> {
         (self.emit)("job-status", json!({ "id": id, "status": status, "reason": reason }));
     }
 
-    /// Runs a command; with `slow`, flags the row once it has run for a while.
-    fn exec(&self, cmd: Command, slow: Option<(u64, Instant)>) -> ffmpeg::Output {
-        ffmpeg::run(cmd, &self.ctl.cancel, &self.ctl.child, |reached| {
+    /// What to do as ffmpeg reports how far it has got; with `slow`, the row
+    /// is also flagged once it has run for a while.
+    fn ticks(&self, slow: Option<(u64, Instant)>) -> impl FnMut(Option<f64>) + '_ {
+        move |reached| {
             if let Some(t) = reached {
                 self.reached(t);
             }
@@ -291,7 +304,12 @@ impl Worker<'_> {
                     (self.emit)("job-slow", json!({ "id": id }));
                 }
             }
-        })
+        }
+    }
+
+    /// Runs a command; with `slow`, flags the row once it has run for a while.
+    fn exec(&self, cmd: Command, slow: Option<(u64, Instant)>) -> ffmpeg::Output {
+        ffmpeg::run(cmd, &self.ctl.cancel, &self.ctl.child, self.ticks(slow))
     }
 
     fn ff(&self, args: Vec<String>, slow: Option<(u64, Instant)>) -> ffmpeg::Output {
@@ -389,6 +407,20 @@ impl Worker<'_> {
 
         // A Space (or a local .m4a/.ts/.aac): copy through an MPEG-TS file
         let space = (!local && hls::is_m3u8(url)).then(|| hls::resolve(url, live_of(row)).ok()).flatten();
+        // Its pieces fetched several at a time (see `fetch`); should that not
+        // work out, ffmpeg reads the list itself, as it always did
+        if let Some(list) = space.as_ref().filter(|_| in_parallel()) {
+            match self.fetched(id, list, span, &ts, len) {
+                Some(true) => return self.remux(id, &ts_file, m4a_file, len),
+                Some(false) => {
+                    let _ = fs::remove_file(&ts_file);
+                }
+                None => {
+                    let _ = fs::remove_file(&ts_file);
+                    return None;
+                }
+            }
+        }
         let mut trim: Option<(PathBuf, f64)> = None;
         let cut = match span {
             // Pieces from elsewhere than the list says need a list of their own
@@ -462,12 +494,59 @@ impl Worker<'_> {
             return None;
         }
         drop_trim(&trim);
+        self.remux(id, &ts_file, m4a_file, len)
+    }
 
+    /// A Space's clip copied into `ts` from its pieces, fetched several at a
+    /// time and fed to ffmpeg in order: true once done, false when it should
+    /// be cut the old way (a piece couldn't be had, or ffmpeg failed on them),
+    /// None if cancelled.
+    fn fetched(&self, id: u64, list: &hls::Playlist, span: Option<(u64, u64)>, ts: &str, len: f64) -> Option<bool> {
+        let (s0, e0) = span.map_or((0.0, list.duration), |(a, b)| (a as f64, b as f64));
+        let pieces: Vec<&hls::Segment> = list.segments.iter().filter(|s| s.start + s.dur > s0 && s.start < e0).collect();
+        // Only AAC pieces, as Spaces have, run on into one another when fed
+        let aac = pieces.iter().all(|s| s.url.split('?').next().unwrap_or("").ends_with(".aac"));
+        let Some(first) = pieces.first().filter(|_| aac) else {
+            return Some(false);
+        };
+        let mut a = args!["-f", "aac", "-i", "pipe:0"];
+        if let Some((s0, e0)) = span {
+            a.extend(args!["-ss", format!("{:.3}", (s0 as f64 - first.start).max(0.0)), "-t", (e0 - s0).to_string()]);
+        }
+        a.extend(args!["-c", "copy", "-f", "mpegts", "-y", ts]);
+        let mut cmd = Command::new(&self.ffmpeg);
+        cmd.args(&a);
+        let urls: Vec<String> = pieces.iter().map(|s| s.url.clone()).collect();
+        // The last piece only up to the clip's end: where the list's timing
+        // has a gap (a piece listed longer than its sound), the sound would
+        // otherwise run on past the end before ffmpeg's -t stops it
+        let last = pieces.len() - 1;
+        let until = span.map(|(_, e0)| e0 as f64 - pieces[last].start);
+        self.status(id, "Cutting");
+        self.step(0.0, 0.92, len);
+        let ticks = self.ticks(Some((id, Instant::now())));
+        let (out, fed) = ffmpeg::run_fed(cmd, &self.ctl.cancel, &self.ctl.child, ticks, move |mut stdin, finished| {
+            fetch::in_order(urls, fetch::AHEAD_CUT, move || finished.load(Ordering::SeqCst), |i, piece| {
+                let piece = match until {
+                    Some(secs) if i == last => hls::adts_until(piece, secs),
+                    _ => piece,
+                };
+                stdin.write_all(piece).is_ok()
+            })
+        });
+        if self.cancelled() {
+            return None;
+        }
+        Some(out.ok && matches!(fed, Some(Ok(()))))
+    }
+
+    /// The copied .ts into the .m4a that is kept.
+    fn remux(&self, id: u64, ts_file: &Path, m4a_file: PathBuf, len: f64) -> Option<PathBuf> {
         self.status(id, "Converting");
         self.step(0.92, 1.0, len);
-        let out = self.ff(args!["-i", &ts, "-c", "copy", "-y", &m4a], None);
+        let out = self.ff(args!["-i", path_str(ts_file), "-c", "copy", "-y", path_str(&m4a_file)], None);
         if out.ok {
-            let _ = fs::remove_file(&ts_file);
+            let _ = fs::remove_file(ts_file);
             return Some(m4a_file);
         }
         self.fail(id, "Convert Error", &out.stderr);
@@ -573,6 +652,11 @@ mod tests {
 
     use super::*;
     use std::sync::Mutex;
+
+    thread_local! {
+        /// See `in_parallel`.
+        pub(super) static PARALLEL: Cell<bool> = const { Cell::new(true) };
+    }
 
     fn row(id: u64, url: &str, start: &str, end: &str, name: &str) -> Row {
         Row { id, url: url.into(), full: false, start: start.into(), end: end.into(), name: name.into(), length: 0.0, live: String::new() }
@@ -742,6 +826,169 @@ mod tests {
         println!("missing file:  {:?}", reasons("/Users/Shared/no-such-clip.m4a", &tmp));
         println!("no internet:   {:?}", reasons("https://no-such-host.invalid/a/playlist.m3u8", &tmp));
         println!("locked folder: {:?}", reasons(gone, "/System/Library/spacecutter-test"));
+    }
+
+    /// A fingerprint of each AAC frame of a file's sound, in order.
+    fn frames_of(path: &Path) -> Vec<String> {
+        let out = Command::new(ffmpeg::locate(None).unwrap())
+            .args(["-v", "error", "-i", &path_str(path), "-map", "0:a", "-c", "copy", "-f", "framemd5", "-"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .filter_map(|l| l.rsplit(',').next().map(|md5| md5.trim().to_string()))
+            .collect()
+    }
+
+    /// The same clip cut both ways, timed: ffmpeg reading the list itself,
+    /// one piece after another, and the pieces fetched several at a time.
+    /// Both must hold the same AAC frames, bit for bit, but for a frame or
+    /// two where they start and end. Where the Space has a gap (a piece
+    /// listed longer than its sound, the host's connection having dropped),
+    /// ffmpeg keeps it as a pause, so its clip is that much longer; the fed
+    /// pieces run on without it, as the player plays them:
+    /// SPACE_URL='https://…' CLIP='01:00:00-01:20:00' cargo test -- --ignored --nocapture cuts_the_same
+    #[test]
+    #[ignore]
+    fn cuts_the_same_with_the_pieces_fetched_several_at_a_time() {
+        let url = std::env::var("SPACE_URL").expect("set SPACE_URL");
+        let clip = std::env::var("CLIP").unwrap_or_else(|_| "01:00:00-01:20:00".into());
+        let (start, end) = clip.split_once('-').unwrap();
+        let dir = std::env::temp_dir().join(format!("spacecutter_same_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        hls::resolve(&url, None).unwrap();
+        // The second cut finds its pieces in the server's cache; FIRST=several for the other order
+        let mut ways = [(false, "one-by-one"), (true, "several")];
+        if std::env::var("FIRST").is_ok_and(|f| f == "several") {
+            ways.reverse();
+        }
+        for (parallel, name) in ways {
+            PARALLEL.with(|p| p.set(parallel));
+            let t = Instant::now();
+            let events = run(&Job { rows: vec![row(1, &url, start, end, name)], output_folder: path_str(&dir), merge: false, merge_name: String::new(), keep_clips: true, jingles: HashMap::new() });
+            println!("{name}: {:.1} s", t.elapsed().as_secs_f64());
+            assert!(events.iter().any(|e| e.contains("Done")), "{events:#?}");
+        }
+        PARALLEL.with(|p| p.set(true));
+        let (a, b) = (dir.join("one-by-one.m4a"), dir.join("several.m4a"));
+        let (la, lb) = (length(&a), length(&b));
+        let (fa, fb) = (frames_of(&a), frames_of(&b));
+        if std::env::var("KEEP").is_ok() {
+            println!("kept in {}", dir.display());
+        } else {
+            let _ = fs::remove_dir_all(&dir);
+        }
+        // Where the second starts in the first, or the first in the second
+        let shift = (0..3)
+            .find_map(|k| (fa.get(k) == fb.first()).then_some(k as i64))
+            .or_else(|| (1..3).find_map(|k| (fb.get(k) == fa.first()).then_some(-(k as i64))))
+            .expect("the starts differ");
+        let (sa, sb) = (shift.max(0) as usize, (-shift).max(0) as usize);
+        let n = (fa.len() - sa).min(fb.len() - sb);
+        let same = (0..n).take_while(|&i| fa[sa + i] == fb[sb + i]).count();
+        println!("lengths: {la:.3} s and {lb:.3} s; frames: {} and {}, the same for {same} of {n} (one starting {shift} on)", fa.len(), fb.len());
+        assert_eq!(same, n, "the frames differ from frame {same} on");
+        assert!(fa.len().abs_diff(fb.len()) <= 4, "one has more frames than the other");
+        assert!(lb <= la + 0.05, "the fed pieces came out longer");
+    }
+
+    /// A whole Space cut from its dynamic link, as the app does it, timed;
+    /// WAY=one-by-one for ffmpeg reading the list itself:
+    /// DYNAMIC_URL='https://…' WAY=several cargo test -- --ignored --nocapture times_a_whole
+    #[test]
+    #[ignore]
+    fn times_a_whole_space() {
+        let dynamic = std::env::var("DYNAMIC_URL").expect("set DYNAMIC_URL");
+        let parallel = std::env::var("WAY").map_or(true, |w| w != "one-by-one");
+        PARALLEL.with(|p| p.set(parallel));
+        let replay = hls::live_to_replay(&dynamic).unwrap();
+        let dir = std::env::temp_dir().join(format!("spacecutter_whole_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut whole = row(1, &replay, "", "", "whole");
+        whole.full = true;
+        whole.live = dynamic;
+        let t = Instant::now();
+        let events = run(&Job { rows: vec![whole], output_folder: path_str(&dir), merge: false, merge_name: String::new(), keep_clips: true, jingles: HashMap::new() });
+        let took = t.elapsed().as_secs_f64();
+        let got = length(&dir.join("whole.m4a"));
+        let _ = fs::remove_dir_all(&dir);
+        PARALLEL.with(|p| p.set(true));
+        println!("{}: {:.1} min for {:.1} min of sound", if parallel { "several at a time" } else { "one by one" }, took / 60.0, got / 60.0);
+        assert!(events.iter().any(|e| e.contains("Done")), "{events:#?}");
+    }
+
+    /// A job as the window sends it, read from the JSON file in JOB, run and
+    /// timed; what it reports is printed with the seconds since the start:
+    /// JOB=job.json cargo test -- --ignored --nocapture runs_a_job_from
+    #[test]
+    #[ignore]
+    fn runs_a_job_from_a_file() {
+        let job: Job = serde_json::from_str(&fs::read_to_string(std::env::var("JOB").expect("set JOB")).unwrap()).unwrap();
+        let t = Instant::now();
+        let emit = |name: &str, payload: Value| {
+            if name != "job-progress" {
+                println!("{:8.1} s  {name} {payload}", t.elapsed().as_secs_f64());
+            }
+        };
+        run_job(&emit, ffmpeg::locate(None), &Control::default(), &job);
+        println!("{:8.1} s  finished", t.elapsed().as_secs_f64());
+    }
+
+    /// A cancel stops a cut at once, fetching included, and leaves nothing behind.
+    #[test]
+    #[ignore]
+    fn a_cancel_stops_the_fetching_at_once() {
+        let url = std::env::var("SPACE_URL").expect("set SPACE_URL");
+        let dir = std::env::temp_dir().join(format!("spacecutter_cancel_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        hls::resolve(&url, None).unwrap();
+        let mut whole = row(1, &url, "", "", "whole");
+        whole.full = true;
+        let job = Job { rows: vec![whole], output_folder: path_str(&dir), merge: false, merge_name: String::new(), keep_clips: true, jingles: HashMap::new() };
+        let ctl = Arc::new(Control::default());
+        let stopper = {
+            let ctl = ctl.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_secs(5));
+                ctl.stop();
+                Instant::now()
+            })
+        };
+        run_job(&|_: &str, _: Value| {}, ffmpeg::locate(None), &ctl, &job);
+        let took = stopper.join().unwrap().elapsed();
+        let left: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        let _ = fs::remove_dir_all(&dir);
+        println!("stopped {:.2} s after the cancel; left behind: {left:?}", took.as_secs_f64());
+        assert!(took < Duration::from_secs(2));
+        assert!(left.is_empty());
+    }
+
+    /// A piece the server hasn't got is left out and the clip still comes
+    /// out, about a piece shorter; with too many gone it is cut the old way.
+    #[test]
+    #[ignore]
+    fn leaves_out_a_missing_piece() {
+        let url = std::env::var("SPACE_URL").expect("set SPACE_URL");
+        let dir = std::env::temp_dir().join(format!("spacecutter_gone_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut list = hls::resolve(&url, None).unwrap();
+        let ctl = Control::default();
+        let worker = Worker { emit: &|_: &str, _: Value| {}, ffmpeg: ffmpeg::locate(None).unwrap(), out: dir.clone(), ctl: &ctl, warned: Cell::new(false), meter: Meter::default() };
+        let k = list.segments.iter().position(|s| s.start > 630.0).unwrap();
+        list.segments[k].url = list.segments[k].url.replace("chunk_", "chunk_gone_");
+        let ts = dir.join("one-gone.ts");
+        let one = worker.fetched(1, &list, Some((600, 660)), &path_str(&ts), 60.0);
+        let got = length(&ts);
+        for s in list.segments.iter_mut().skip(k + 2).take(6) {
+            s.url = s.url.replace("chunk_", "chunk_gone_");
+        }
+        let many = worker.fetched(2, &list, Some((600, 660)), &path_str(&dir.join("many-gone.ts")), 60.0);
+        let _ = fs::remove_dir_all(&dir);
+        println!("one piece gone: {one:?}, {got:.2} s; seven gone: {many:?}");
+        assert_eq!(one, Some(true));
+        assert!(got > 56.0 && got < 60.5, "{got} s");
+        assert_eq!(many, Some(false));
     }
 
     #[test]

@@ -1,8 +1,8 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -44,13 +44,41 @@ pub fn locate(resource_dir: Option<PathBuf>) -> Option<PathBuf> {
 /// Runs a command to the end, stopping it if `cancel` is raised. `tick` is
 /// called a few times a second while it runs, with how far ffmpeg has got
 /// (seconds of output written, from its "time=" reports).
-pub fn run(mut cmd: Command, cancel: &AtomicBool, slot: &Slot, mut tick: impl FnMut(Option<f64>)) -> Output {
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+pub fn run(cmd: Command, cancel: &AtomicBool, slot: &Slot, tick: impl FnMut(Option<f64>)) -> Output {
+    execute(cmd, cancel, slot, tick, None)
+}
+
+/// As `run`, with `feed` writing what ffmpeg reads (`-i pipe:0`), on a thread
+/// of its own. The flag it is given is raised once ffmpeg has finished, so it
+/// can stop waiting; what it returns comes back with the output.
+pub fn run_fed<T: Send + 'static>(
+    cmd: Command,
+    cancel: &AtomicBool,
+    slot: &Slot,
+    tick: impl FnMut(Option<f64>),
+    feed: impl FnOnce(ChildStdin, Arc<AtomicBool>) -> T + Send + 'static,
+) -> (Output, Option<T>) {
+    let finished = Arc::new(AtomicBool::new(false));
+    let (told, (tx, rx)) = (finished.clone(), mpsc::channel());
+    let out = execute(cmd, cancel, slot, tick, Some(Box::new(move |stdin| {
+        let _ = tx.send(feed(stdin, told));
+    })));
+    finished.store(true, Ordering::SeqCst);
+    (out, rx.recv().ok())
+}
+
+type Feed = Box<dyn FnOnce(ChildStdin) + Send>;
+
+fn execute(mut cmd: Command, cancel: &AtomicBool, slot: &Slot, mut tick: impl FnMut(Option<f64>), feed: Option<Feed>) -> Output {
+    cmd.stdin(if feed.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::null()).stderr(Stdio::piped());
     quiet(&mut cmd);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return Output { ok: false, stderr: e.to_string() },
     };
+    if let (Some(feed), Some(stdin)) = (feed, child.stdin.take()) {
+        thread::spawn(move || feed(stdin));
+    }
     let reached = Arc::new(Mutex::new(None));
     let stderr = child.stderr.take().map(|e| read_reports(e, reached.clone()));
     *slot.lock().unwrap() = Some(child);

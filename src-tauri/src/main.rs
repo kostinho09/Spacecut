@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cutter;
+mod fetch;
 mod ffmpeg;
 mod hls;
 mod player;
