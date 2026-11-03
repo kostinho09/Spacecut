@@ -18,6 +18,7 @@
   --pop: #ffffff;
   --shade: rgba(0, 0, 0, .12);
   --red: #d9534a;
+  --live: #e5484d;
   --green: #2a9d78;
   --font: ui-rounded, "SF Pro Rounded", "Nunito", "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
   color-scheme: light;
@@ -198,6 +199,8 @@ main { flex: 1; overflow-y: auto; padding: 4px 18px 10px; }
 }
 .tag .t { overflow: hidden; text-overflow: ellipsis; }
 .tag .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--c); flex: none; }
+/* Breathing while its sound plays, heard from another tag */
+.tag .dot.heard { animation: breathe 1.6s ease-in-out infinite; }
 .tag:hover { color: var(--fg); }
 .tag .tcopy { width: 24px; height: 24px; margin-right: -8px; border-radius: 50%; display: grid; place-items: center; opacity: .65; }
 .tag .tcopy svg { width: 14px; height: 14px; }
@@ -217,6 +220,16 @@ main { flex: 1; overflow-y: auto; padding: 4px 18px 10px; }
 /* The Space's dot beside the time: still while paused, softly breathing while it plays */
 .live-dot { display: inline-block; width: 10px; height: 10px; margin-left: 12px; border-radius: 50%; background: var(--c); vertical-align: 3px; }
 .live-dot.on { animation: breathe 3.2s ease-in-out infinite; }
+/* A Space on air: red while heard live, grey (back to live) otherwise */
+.live-pill {
+  display: inline-flex; align-items: center; gap: 5px; margin-left: 12px; vertical-align: 4px;
+  padding: 4px 9px 4px 8px; border-radius: 999px; line-height: 1;
+  font-size: 11px; font-weight: 800; letter-spacing: .07em;
+  color: var(--mu); box-shadow: inset 0 0 0 1.5px var(--mu);
+}
+.live-pill i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.live-pill.on { background: var(--live); color: #fff; box-shadow: none; }
+.live-pill.on i { background: #fff; animation: breathe 1.6s ease-in-out infinite; }
 /* Barely there: the dot just softens a little and comes back */
 @keyframes breathe {
   0%, 100% { opacity: 1; }

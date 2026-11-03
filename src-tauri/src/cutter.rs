@@ -417,7 +417,20 @@ impl Worker<'_> {
         }
 
         // A Space (or a local .m4a/.ts/.aac): copy through an MPEG-TS file
-        let space = (!local && hls::is_m3u8(url)).then(|| hls::resolve(url, live_of(row)).ok()).flatten();
+        let mut space = (!local && hls::is_m3u8(url)).then(|| hls::resolve(url, live_of(row)).ok()).flatten();
+        // A clip of a Space on air may end a moment past what its list has out yet
+        if let Some((_, e0)) = span {
+            for _ in 0..8 {
+                let short = space.as_ref().is_some_and(|l| !l.ended && l.duration < e0 as f64);
+                if !short || self.cancelled() {
+                    break;
+                }
+                thread::sleep(Duration::from_secs(2));
+                if let Ok(list) = hls::resolve(url, live_of(row)) {
+                    space = Some(list);
+                }
+            }
+        }
         // ffmpeg would give the start of the Space instead
         if let (Some(list), Some((s0, _))) = (&space, span) {
             if let Some(reason) = past_the_end(list, s0) {

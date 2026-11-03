@@ -7,6 +7,10 @@
 //! segments ourselves keeps ffmpeg away from the stream timestamps, so the
 //! MPEG-TS wrap that breaks seeking in long Spaces never reaches it, and the
 //! playhead sits on the same #EXTINF timeline the cuts use.
+//!
+//! A Space still on air grows as it plays: its live list, which holds only
+//! the last few pieces, names the new ones every few seconds, and any it
+//! skipped (say, while a request hung) come from a fresh replay.
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -15,7 +19,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SizedSample};
@@ -28,6 +32,21 @@ use crate::util::quiet;
 
 /// Seconds of decoded audio kept ready ahead of the speaker.
 const AHEAD_SECS: f64 = 4.0;
+
+/// How far behind the newest piece "live" plays, so a piece that is slow to
+/// come (10 s at worst, as measured) doesn't break the sound.
+pub const LIVE_BACK: f64 = 10.0;
+
+/// How often a live Space's list is asked for its newest pieces: while it
+/// plays, and while paused. The list holds only ~9 s, so never less often.
+const LIVE_EVERY: Duration = Duration::from_millis(2500);
+const LIVE_EVERY_PAUSED: Duration = Duration::from_secs(6);
+
+/// A fresh replay for pieces the live list skipped, at most this often.
+const TOP_UP_EVERY: Duration = Duration::from_secs(15);
+
+/// With no new piece for this long, a fresh replay tells whether the Space is over.
+const LIVE_QUIET: Duration = Duration::from_secs(60);
 
 /// What the decoder thread and the audio callback share.
 #[derive(Default)]
@@ -51,7 +70,139 @@ struct Shared {
 
 enum Source {
     Hls(Arc<Vec<Segment>>),
+    Live(Arc<Live>),
     Direct(String),
+}
+
+/// A Space on air: its pieces so far, added to as new ones come out.
+#[derive(Default)]
+struct Live {
+    state: Mutex<OnAir>,
+    grew: Condvar,
+    /// Another source was loaded: stop following this one.
+    stop: AtomicBool,
+}
+
+#[derive(Default)]
+struct OnAir {
+    segments: Vec<Segment>,
+    ended: bool,
+}
+
+impl Live {
+    fn duration(&self) -> f64 {
+        self.state.lock().unwrap().segments.last().map_or(0.0, |s| s.start + s.dur)
+    }
+
+    fn ended(&self) -> bool {
+        self.state.lock().unwrap().ended
+    }
+
+    fn end(&self) {
+        self.state.lock().unwrap().ended = true;
+        self.grew.notify_all();
+    }
+
+    /// Adds the pieces the live list names after the last one held.
+    fn add(&self, pieces: &[hls::LivePiece]) -> News {
+        let mut st = self.state.lock().unwrap();
+        let Some(mut have) = st.segments.last().and_then(|s| hls::piece_number(&s.url)) else { return News::Skipped };
+        let mut news = News::None;
+        let held = have;
+        for piece in pieces.iter().filter(|p| p.seq > held) {
+            // Pieces it no longer names: only a replay has those
+            if piece.seq != have + 1 {
+                news = News::Skipped;
+                break;
+            }
+            let last = &st.segments[st.segments.len() - 1];
+            let next = Segment { start: last.start + last.dur, dur: piece.dur, url: beside(&last.url, &piece.name) };
+            st.segments.push(next);
+            have = piece.seq;
+            news = News::Added;
+        }
+        drop(st);
+        self.grew.notify_all();
+        news
+    }
+
+    /// Takes the pieces past the last one held from a fresh replay of the
+    /// Space; true if there were any.
+    fn top_up(&self, url: &str, given: Option<&str>) -> bool {
+        let Ok(list) = hls::resolve(url, given) else { return false };
+        let mut st = self.state.lock().unwrap();
+        let have = st.segments.last().and_then(|s| hls::piece_number(&s.url));
+        let Some(from) = list.segments.iter().position(|s| hls::piece_number(&s.url) > have) else { return false };
+        // On the timeline the pieces already held set
+        let mut t = st.segments.last().map_or(0.0, |s| s.start + s.dur);
+        for seg in &list.segments[from..] {
+            st.segments.push(Segment { start: t, dur: seg.dur, url: seg.url.clone() });
+            t += seg.dur;
+        }
+        drop(st);
+        self.grew.notify_all();
+        true
+    }
+}
+
+#[derive(PartialEq)]
+enum News {
+    None,
+    Added,
+    Skipped,
+}
+
+/// A piece named by the live list, where the pieces held so far are kept.
+fn beside(last: &str, name: &str) -> String {
+    let (path, query) = last.split_once('?').map_or((last, None), |(p, q)| (p, Some(q)));
+    let folder = &path[..path.rfind('/').map_or(0, |i| i + 1)];
+    let name = name.split('?').next().unwrap_or(name);
+    match query {
+        Some(q) => format!("{folder}{name}?{q}"),
+        None => format!("{folder}{name}"),
+    }
+}
+
+/// Follows a Space on air until it is over or another source is loaded.
+fn follow(live: Arc<Live>, shared: Arc<Shared>, dynamic: String, url: String, given: Option<String>) {
+    let mut news = Instant::now();
+    let mut topped = Instant::now() - TOP_UP_EVERY;
+    loop {
+        let every = if shared.playing.load(Relaxed) { LIVE_EVERY } else { LIVE_EVERY_PAUSED };
+        let st = live.state.lock().unwrap();
+        let (st, _) = live.grew.wait_timeout_while(st, every, |_| !live.stop.load(Relaxed)).unwrap();
+        drop(st);
+        if live.stop.load(Relaxed) {
+            return;
+        }
+        match hls::check_live(&dynamic) {
+            hls::LiveCheck::Over => {
+                live.top_up(&url, given.as_deref());
+                live.end();
+                return;
+            }
+            hls::LiveCheck::On(pieces) => {
+                let grew = match live.add(&pieces) {
+                    News::Added => true,
+                    News::Skipped if topped.elapsed() >= TOP_UP_EVERY => {
+                        topped = Instant::now();
+                        live.top_up(&url, given.as_deref())
+                    }
+                    _ => false,
+                };
+                if grew {
+                    news = Instant::now();
+                } else if news.elapsed() > LIVE_QUIET {
+                    if !live.top_up(&url, given.as_deref()) {
+                        live.end();
+                        return;
+                    }
+                    news = Instant::now();
+                }
+            }
+            hls::LiveCheck::Unknown => {}
+        }
+    }
 }
 
 type ChildSlot = Arc<Mutex<Option<Child>>>;
@@ -83,6 +234,8 @@ pub struct Player {
 pub struct LoadInfo {
     duration: f64,
     started: Option<String>,
+    /// A Space still on air.
+    live: bool,
 }
 
 #[derive(Serialize)]
@@ -96,6 +249,7 @@ pub struct State {
     ended: bool,
     error: Option<String>,
     fx: bool,
+    live: bool,
 }
 
 impl Player {
@@ -112,7 +266,15 @@ impl Player {
         }
         let (source, duration, started) = if hls::is_m3u8(url) {
             let list = hls::resolve(url, live)?;
-            (Source::Hls(Arc::new(list.segments)), list.duration, list.started)
+            match hls::dynamic_for(url, live).filter(|_| !list.ended) {
+                Some(dynamic) => {
+                    let on_air = Arc::new(Live { state: Mutex::new(OnAir { segments: list.segments, ended: false }), ..Live::default() });
+                    let (follower, shared, url, given) = (on_air.clone(), self.shared.clone(), url.to_string(), live.map(str::to_string));
+                    thread::spawn(move || follow(follower, shared, dynamic, url, given));
+                    (Source::Live(on_air), list.duration, list.started)
+                }
+                None => (Source::Hls(Arc::new(list.segments)), list.duration, list.started),
+            }
         } else {
             let web = url.starts_with("http://") || url.starts_with("https://");
             if !web && !Path::new(url).exists() {
@@ -121,14 +283,16 @@ impl Player {
             let ff = self.ffmpeg.as_deref().ok_or("FFmpeg not found")?;
             (Source::Direct(url.to_string()), ffmpeg::probe_duration(ff, url).unwrap_or(0.0), None)
         };
+        let live = matches!(source, Source::Live(_));
         let mut inner = self.inner.lock().unwrap();
         self.shared.playing.store(false, Relaxed);
         self.stop_session(&mut inner);
+        let_go(&inner);
         inner.source = Some(Arc::new(source));
         inner.url = url.to_string();
         inner.duration = duration;
         inner.base = 0.0;
-        Ok(LoadInfo { duration, started })
+        Ok(LoadInfo { duration, started, live })
     }
 
     pub fn play(&self) -> Result<(), String> {
@@ -139,9 +303,11 @@ impl Player {
         let format = self.format();
         let mut pos = self.position(&inner);
         self.ensure_audio(&mut inner)?;
-        let ended = self.shared.ended.load(Relaxed) || (inner.duration > 0.0 && pos >= inner.duration - 0.5);
+        let duration = duration_of(&inner);
+        let ended = self.shared.ended.load(Relaxed) || (duration > 0.0 && pos >= duration - 0.5);
         if ended {
-            pos = 0.0;
+            // Caught up with a Space on air: back on live; otherwise from the start
+            pos = if on_air(&inner) { (duration - LIVE_BACK).max(0.0) } else { 0.0 };
         }
         let failed = inner.error.lock().unwrap().is_some();
         if !inner.session || ended || failed || format != self.format() {
@@ -161,7 +327,8 @@ impl Player {
         if inner.source.is_none() {
             return Err("Nothing is loaded".into());
         }
-        let end = if inner.duration > 0.0 { inner.duration } else { f64::MAX };
+        let duration = duration_of(&inner);
+        let end = if duration > 0.0 { duration } else { f64::MAX };
         self.ensure_audio(&mut inner)?;
         // Decoding starts right away, so playing after a paused seek is instant
         self.restart(&mut inner, t.clamp(0.0, end));
@@ -195,13 +362,14 @@ impl Player {
         State {
             loaded: inner.source.is_some(),
             url: inner.url.clone(),
-            duration: inner.duration,
+            duration: duration_of(&inner),
             pos: self.position(&inner),
             playing,
             buffering,
             ended: sh.ended.load(Relaxed),
             error,
             fx: sh.fx.lock().map(|f| !f.is_empty()).unwrap_or(false),
+            live: on_air(&inner),
         }
     }
 
@@ -237,6 +405,7 @@ impl Player {
         let mut inner = self.inner.lock().unwrap();
         self.shared.playing.store(false, Relaxed);
         self.stop_session(&mut inner);
+        let_go(&inner);
         inner.wake = None;
     }
 
@@ -248,8 +417,9 @@ impl Player {
         let rate = self.shared.rate.load(Relaxed).max(1) as f64;
         // Each second played covers `speed` seconds of the recording
         let pos = inner.base + self.shared.frames.load(Relaxed) as f64 / rate * inner.speed;
-        if inner.duration > 0.0 {
-            pos.min(inner.duration)
+        let duration = duration_of(inner);
+        if duration > 0.0 {
+            pos.min(duration)
         } else {
             pos
         }
@@ -322,6 +492,26 @@ impl Player {
                 shared.eof.store(true, Relaxed);
             }
         });
+    }
+}
+
+/// How long the loaded recording is: so far, for a Space on air.
+fn duration_of(inner: &Inner) -> f64 {
+    match inner.source.as_deref() {
+        Some(Source::Live(live)) => live.duration(),
+        _ => inner.duration,
+    }
+}
+
+fn on_air(inner: &Inner) -> bool {
+    matches!(inner.source.as_deref(), Some(Source::Live(live)) if !live.ended())
+}
+
+/// Stops following the Space on air loaded until now, if it was one.
+fn let_go(inner: &Inner) {
+    if let Some(Source::Live(live)) = inner.source.as_deref() {
+        live.stop.store(true, Relaxed);
+        live.grew.notify_all();
     }
 }
 
@@ -430,6 +620,12 @@ where
     }
 }
 
+/// The pieces a session feeds ffmpeg: a fixed list, or one still growing.
+enum Feed {
+    Fixed(Arc<Vec<Segment>>, usize),
+    Live(Arc<Live>, usize),
+}
+
 /// One playback session: ffmpeg decoding from `at` onward into the shared
 /// buffer, at `speed` (pitch kept by ffmpeg's atempo filter).
 #[allow(clippy::too_many_arguments)]
@@ -457,7 +653,20 @@ fn decode(
                 .ok_or("This is the end of the recording")?;
             skip = (at - segments[first].start).max(0.0);
             cmd.args(["-f", "aac", "-i", "pipe:0"]).stdin(Stdio::piped());
-            feed = Some((segments.clone(), first));
+            feed = Some(Feed::Fixed(segments.clone(), first));
+        }
+        Source::Live(live) => {
+            let st = live.state.lock().unwrap();
+            let first = st
+                .segments
+                .iter()
+                .position(|s| s.start + s.dur > at)
+                .or_else(|| st.segments.len().checked_sub(1))
+                .ok_or("This is the end of the recording")?;
+            skip = (at - st.segments[first].start).max(0.0);
+            drop(st);
+            cmd.args(["-f", "aac", "-i", "pipe:0"]).stdin(Stdio::piped());
+            feed = Some(Feed::Live(live.clone(), first));
         }
         Source::Direct(input) => {
             let from = format!("{at:.3}");
@@ -492,13 +701,43 @@ fn decode(
     });
 
     let feeder = match (feed, stdin) {
-        (Some((segments, first)), Some(mut pipe)) => {
+        (Some(Feed::Fixed(segments, first)), Some(mut pipe)) => {
             let sh = sh.clone();
             Some(thread::spawn(move || -> Result<(), String> {
                 // A few pieces ahead are fetched at once, so a slow one doesn't hold up the sound
                 let urls = segments[first..].iter().map(|s| s.url.clone()).collect();
                 fetch::in_order(urls, fetch::AHEAD_PLAY, move || sh.gen.load(Relaxed) != gen, |_, piece| pipe.write_all(piece).is_ok())
                     .map_err(|e| format!("Could not load the audio ({e})"))
+            }))
+        }
+        (Some(Feed::Live(live, first)), Some(mut pipe)) => {
+            let sh = sh.clone();
+            Some(thread::spawn(move || -> Result<(), String> {
+                let mut next = first;
+                loop {
+                    // The pieces out so far, then on as new ones come
+                    let urls: Vec<String> = {
+                        let mut st = live.state.lock().unwrap();
+                        while st.segments.len() <= next && !st.ended && sh.gen.load(Relaxed) == gen && !live.stop.load(Relaxed) {
+                            st = live.grew.wait_timeout(st, Duration::from_millis(300)).unwrap().0;
+                        }
+                        if st.segments.len() <= next || sh.gen.load(Relaxed) != gen {
+                            return Ok(());
+                        }
+                        st.segments[next..].iter().map(|s| s.url.clone()).collect()
+                    };
+                    next += urls.len();
+                    let mut open = true;
+                    let stop = { let sh = sh.clone(); move || sh.gen.load(Relaxed) != gen };
+                    fetch::in_order(urls, fetch::AHEAD_PLAY, stop, |_, piece| {
+                        open = pipe.write_all(piece).is_ok();
+                        open
+                    })
+                    .map_err(|e| format!("Could not load the audio ({e})"))?;
+                    if !open {
+                        return Ok(());
+                    }
+                }
             }))
         }
         _ => None,
@@ -572,6 +811,73 @@ mod tests {
     use std::time::Instant;
 
     const RATE: u32 = 48000;
+
+    fn piece(seq: u64) -> hls::LivePiece {
+        hls::LivePiece { seq, dur: 3.0, name: format!("chunk_17936_{seq}_b.aac") }
+    }
+
+    #[test]
+    fn a_space_on_air_grows_by_the_pieces_its_live_list_names() {
+        let base = "https://h/hls/K/non_transcode/pdxa/periscope-replays-public/audio-space/";
+        let segments = (0..3).map(|i| Segment { start: i as f64 * 3.0, dur: 3.0, url: format!("{base}chunk_17936_{i}_b.aac") }).collect();
+        let live = Live { state: Mutex::new(OnAir { segments, ended: false }), ..Live::default() };
+        assert!(live.add(&[piece(1), piece(2)]) == News::None, "nothing new");
+        assert!(live.add(&[piece(2), piece(3), piece(4)]) == News::Added);
+        assert_eq!(live.duration(), 15.0);
+        // Its own name, where the others are; not the live folder's
+        assert_eq!(live.state.lock().unwrap().segments[4].url, format!("{base}chunk_17936_4_b.aac"));
+        assert!(live.add(&[piece(7), piece(8)]) == News::Skipped, "5 and 6 only a replay has");
+        assert_eq!(live.duration(), 15.0);
+        assert_eq!(beside("https://h/live/chunk_1_9_b.aac?type=live", "chunk_1_10_b.aac?type=live"), "https://h/live/chunk_1_10_b.aac?type=live");
+    }
+
+    /// Needs a Space on air: LIVE_URL='https://…/dynamic_playlist.m3u8?type=live'.
+    /// Opens it, plays 25 s from live (more than it had when opened), and checks it grew.
+    #[test]
+    #[ignore]
+    fn follows_a_space_on_air() {
+        let dynamic = std::env::var("LIVE_URL").expect("set LIVE_URL to a live Space's dynamic link");
+        let replay = hls::live_to_replay(&dynamic).unwrap();
+        let player = Player::new(ffmpeg::locate(None));
+        let info = player.load(&replay, Some(&dynamic)).unwrap();
+        assert!(info.live, "the Space is on air");
+        let Some(source) = player.inner.lock().unwrap().source.clone() else { panic!("nothing loaded") };
+        let Source::Live(live) = &*source else { panic!("not followed") };
+        let opened = live.duration();
+        println!("opened at {opened:.1} s");
+        let shared = Arc::new(Shared::default());
+        let worker = {
+            let (shared, source) = (shared.clone(), source.clone());
+            let ffmpeg = ffmpeg::locate(None).unwrap();
+            thread::spawn(move || decode(&ffmpeg, &source, opened - LIVE_BACK, 1.0, RATE, 2, 0, &shared, &ChildSlot::default()))
+        };
+        let want = 25 * RATE as usize * 2;
+        let started = Instant::now();
+        let mut got = 0;
+        let mut silent_run = 0usize;
+        let mut worst = 0usize;
+        while got < want {
+            let chunk: Vec<f32> = shared.buf.lock().unwrap().drain(..).collect();
+            shared.room.notify_all();
+            got += chunk.len();
+            assert!(started.elapsed() < Duration::from_secs(90), "the sound stopped coming at {:.1} s", got as f64 / 2.0 / RATE as f64);
+            thread::sleep(Duration::from_millis(20));
+            // Keep to real time, as a speaker would
+            let due = started.elapsed().as_secs_f64() * RATE as f64 * 2.0;
+            if (got as f64) > due + 4.0 * RATE as f64 * 2.0 {
+                thread::sleep(Duration::from_millis(200));
+            }
+            silent_run = if chunk.is_empty() { silent_run + 1 } else { 0 };
+            worst = worst.max(silent_run);
+        }
+        let grown = live.duration() - opened;
+        println!("played 25 s in {:.1} s; the Space grew {grown:.1} s; longest wait {} ms", started.elapsed().as_secs_f64(), worst * 20);
+        shared.gen.fetch_add(1, Relaxed);
+        shared.room.notify_all();
+        worker.join().unwrap().unwrap();
+        assert!(grown > 15.0, "it kept following");
+        player.shutdown();
+    }
 
     fn space_url() -> String {
         std::env::var("SPACE_URL").expect("set SPACE_URL to a Space replay URL")

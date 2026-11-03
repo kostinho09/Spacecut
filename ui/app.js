@@ -106,7 +106,10 @@ const S = {
   resetTimer: 0,
   done: 0,
   total: 0,
-  p: { loaded: false, loading: false, url: '', duration: 0, pos: 0, at: 0, playing: false, buffering: false, ended: false, error: '' },
+  // The Space shown in the player; `view`: only shown, while another one plays
+  p: { loaded: false, loading: false, url: '', duration: 0, pos: 0, at: 0, playing: false, buffering: false, ended: false, error: '', live: false, view: false },
+  player: { url: '', playing: false, live: false },  // what the player itself has
+  shownLive: '',
   loadToken: 0,
   actionAt: 0,
   shownSec: -1,
@@ -165,11 +168,27 @@ function nextColor() {
   return COLORS.find(c => !used.has(c[0])) || COLORS[S.sources.length % COLORS.length];
 }
 
+/** The key all of a Space's links share (dynamic, replay, on any server); null for a file. */
+function spaceKey(url) {
+  const m = /\/hls\/([^/?#]+)\//.exec(url || '');
+  return m ? m[1] : null;
+}
+
+/** The tag already open for this Space or file, if any. While a Space is
+ *  live its replay link comes out different each time, so Spaces are matched by key. */
+function knownSource(url) {
+  const key = spaceKey(url);
+  return S.sources.find(x => x.url === url || (key && spaceKey(x.url) === key));
+}
+
 /** `live` is the Space's dynamic link, when it came from one: where its
  *  pieces can still be found if the replay doesn't give them out. */
 function addSource(url, live = '') {
-  let s = S.sources.find(x => x.url === url);
-  if (s) return s;
+  let s = knownSource(url);
+  if (s) {
+    if (live && !s.live) s.live = live;
+    return s;
+  }
   const local = isLocal(url);
   s = { id: S.nextId++, url, live, local, name: local ? baseName(url) : `Space ${++S.spaceNo}`,
         color: nextColor(), include: true, lastPos: 0 };
@@ -211,6 +230,14 @@ async function addLink(raw) {
   adding = true;
   let live = '';
   try {
+    // A Space already open: back to its tag, with nothing to convert
+    const known = knownSource(url);
+    if (known) {
+      if (/dynamic_playlist\.m3u8/i.test(url) && !known.live) known.live = url;
+      sendOff(input);
+      await activate(known.id);
+      return;
+    }
     if (/dynamic_playlist\.m3u8/i.test(url) && /type=live/i.test(url)) {
       live = url;
       srcNote(`Live ${ICON.arrow} <b>Replay</b>`, 'conv');
@@ -243,12 +270,14 @@ async function activate(id) {
 /** Removes a Space or file and its clips at once, without asking. */
 function removeSource(id) {
   if (!srcById(id)) return;
+  const gone = srcById(id);
   S.sources = S.sources.filter(x => x.id !== id);
   S.clips = S.clips.filter(c => c.src !== id);
+  // Its sound stops with it, even if another Space is shown
+  if (S.player.url === gone.url) { invoke('player_pause'); S.player = { url: '', playing: false, live: false }; }
   if (S.active === id) {
     S.active = null;
-    Object.assign(S.p, { loaded: false, url: '', duration: 0, pos: 0, playing: false, error: '' });
-    invoke('player_pause');
+    Object.assign(S.p, { loaded: false, url: '', duration: 0, pos: 0, playing: false, error: '', live: false, view: false });
     const next = S.sources[S.sources.length - 1];
     if (next) { activate(next.id); return; }
   }
@@ -345,9 +374,14 @@ function renderTags() {
       onclick: () => activate(s.id),
       ondblclick: () => renameSource(s),
       oncontextmenu: e => tagMenu(e, s),
-    }, h('span', { class: 't' }, s.name), s.id === S.active ? null : h('span', { class: 'dot' }), copy));
+    }, h('span', { class: 't' }, s.name), s.id === S.active ? null : h('span', { class: dotClass(s) }), copy));
   }
   S.newTag = null;
+}
+
+/** A tag's dot, breathing while its Space is heard from another tag. */
+function dotClass(s) {
+  return `dot${S.player.url === s.url && S.player.playing ? ' heard' : ''}`;
 }
 
 function renderClips() {
@@ -463,6 +497,10 @@ function renderPlayer() {
   showPlaying();
   const ready = !!s && p.loaded && !p.loading;
   for (const id of ['speed', 'play', 'back', 'fwd', 'mark']) $(`#${id}`).disabled = !ready;
+  // Marking follows what is heard, and that is another Space now
+  if (p.view) for (const id of ['speed', 'mark']) $(`#${id}`).disabled = true;
+  S.shownLive = '';
+  renderLive();
   ui.bar.classList.toggle('off', !ready || !p.duration);
   if (s) for (const [k, v] of Object.entries(colorVars(s))) document.documentElement.style.setProperty(k, v);
   const mark = $('#mark');
@@ -495,36 +533,129 @@ function renderMsg() {
   else if (p.loading) t = 'Loading…';
   else if (p.playing && p.buffering) t = 'Buffering…';
   else if (pendingClip()) t = 'Now mark the end';
+  else if (p.live && !p.view && behindLive() >= AT_LIVE) t = `${fmtLen(behindLive())} behind live`;
+  else if (p.live && !p.view && p.playing) t = 'Listening live';
   else if (p.loaded) t = 'or drag across the bar';
-  ui.msg.textContent = t;
+  if (ui.msg.textContent !== t) ui.msg.textContent = t;
   ui.msg.className = `msg ${k}`;
 }
 
-async function loadPlayer(s) {
+/** How far behind live a Space on air counts as live still, and how far back "live" plays. */
+const AT_LIVE = 20;
+const LIVE_BACK = 10;
+const behindLive = () => Math.round(Math.max(0, S.p.duration - currentPos()));
+
+/** Shows a Space in the player. `force` loads it even while another one plays. */
+async function loadPlayer(s, force = false) {
   if (S.p.url === s.url && (S.p.loaded || S.p.loading)) return;
   const token = ++S.loadToken;
   S.actionAt = performance.now();
-  Object.assign(S.p, { loading: true, loaded: false, playing: false, buffering: false, error: '', url: s.url, duration: 0, pos: 0 });
+  // Still in the player (heard from another tag): carry on with it
+  if (S.player.url === s.url) {
+    const st = await invoke('player_state').catch(() => null);
+    if (token !== S.loadToken) return;
+    if (st && st.loaded && st.url === s.url) {
+      Object.assign(S.p, { loading: false, loaded: true, view: false, url: s.url, duration: st.duration, pos: st.pos, at: performance.now(),
+        playing: st.playing, buffering: st.buffering, ended: st.ended, error: st.error || '', live: st.live });
+      shown();
+      return;
+    }
+  }
+  // What plays keeps playing while another Space is looked at; Play there takes over.
+  // A Space seen before shows at once where it was left; its length is asked
+  // for (a whole replay, for one on air) only the first time and then once a minute.
+  if (!force && S.player.playing) {
+    const known = s.duration > 0;
+    Object.assign(S.p, { loading: !known, loaded: known, view: true, playing: false, buffering: false, error: '', url: s.url,
+      duration: s.duration || 0, pos: Math.min(s.lastPos || 0, s.duration || 0), at: performance.now(), ended: false, live: !!s.isLive });
+    shown();
+    if (known && (!s.isLive || performance.now() - (s.checkedAt || 0) < 60000)) return;
+    try {
+      const info = await invoke('space_info', { url: s.url, live: s.live || null });
+      if (token !== S.loadToken) return;
+      Object.assign(s, { duration: info.duration, isLive: info.live, checkedAt: performance.now() });
+      Object.assign(S.p, { loading: false, loaded: true, duration: info.duration, pos: Math.min(known ? S.p.pos : s.lastPos || 0, info.duration), live: info.live });
+    } catch (e) {
+      if (token !== S.loadToken) return;
+      if (!known) Object.assign(S.p, { loading: false, error: String(e) });
+    }
+    shown();
+    return;
+  }
+  // Loading: the time it was left at shows meanwhile, not 00:00:00
+  Object.assign(S.p, { loading: true, loaded: false, view: false, playing: false, buffering: false, error: '', url: s.url, duration: s.duration || 0, pos: s.lastPos || 0, live: false });
   renderPlayer();
   try {
     const info = await invoke('player_load', { url: s.url, live: s.live || null });
     if (token !== S.loadToken) return;
-    Object.assign(S.p, { loading: false, loaded: true, duration: info.duration, pos: 0, at: performance.now(), ended: false });
-    s.duration = info.duration;
+    S.player = { url: s.url, playing: false, live: info.live };
+    Object.assign(S.p, { loading: false, loaded: true, duration: info.duration, pos: 0, at: performance.now(), ended: false, live: info.live });
+    Object.assign(s, { duration: info.duration, isLive: info.live, checkedAt: performance.now() });
+    // Back where it was left; a Space on air opens on live the first time,
+    // and Play then starts from live as it is by then
     if (s.lastPos > 0) await seek(s.lastPos);
+    else if (info.live) { await seek(Math.max(0, info.duration - LIVE_BACK)); S.p.onLive = true; }
   } catch (e) {
     if (token !== S.loadToken) return;
     Object.assign(S.p, { loading: false, error: String(e) });
   }
+  shown();
+}
+
+function shown() {
   S.actionAt = performance.now();
+  renderTags();
   renderPlayer();
   renderRegions();
   renderMerge();
 }
 
+/** Play pressed on a Space only looked at: it takes the player over from the one playing. */
+async function playHere() {
+  const s = active();
+  if (!s) return;
+  const at = S.p.pos;
+  S.p.url = '';
+  await loadPlayer(s, true);
+  if (!S.p.loaded || S.p.view) return;
+  if (at > 0) await seek(at);
+  await togglePlay();
+}
+
+/** Back to the newest moment of a Space on air, playing. */
+async function goLive() {
+  const s = active();
+  if (!s || !S.p.loaded || !S.p.live) return;
+  if (S.p.view) {
+    S.p.url = '';
+    await loadPlayer(s, true);
+    if (!S.p.loaded || S.p.view) return;
+  } else {
+    await seek(Math.max(0, S.p.duration - LIVE_BACK));
+  }
+  if (!S.p.playing) await togglePlay();
+}
+
+/** LIVE beside the time, for a Space on air. */
+function renderLive() {
+  const p = S.p;
+  const on = p.loaded && p.live;
+  const heard = on && !p.view && p.playing && behindLive() < AT_LIVE;
+  const key = `${on}${heard}`;
+  if (key === S.shownLive) return;
+  S.shownLive = key;
+  const pill = $('#livePill');
+  pill.classList.toggle('hidden', !on);
+  pill.classList.toggle('on', heard);
+  pill.innerHTML = `<i></i>${heard ? 'LIVE' : 'GO LIVE'}`;
+  pill.title = heard ? 'You are listening live' : 'Back to live';
+  $('#liveDot').classList.toggle('hidden', on || !p.loaded || !active());
+}
+
 async function togglePlay() {
   const p = S.p;
   if (!p.loaded || p.loading) return;
+  if (p.view) { await playHere(); return; }
   S.actionAt = performance.now();
   try {
     if (p.playing) {
@@ -532,7 +663,8 @@ async function togglePlay() {
       p.pos = currentPos();
       p.playing = false;
     } else {
-      if (p.ended || (p.duration && p.pos >= p.duration - 0.5)) p.pos = 0;
+      if (!p.live && (p.ended || (p.duration && p.pos >= p.duration - 0.5))) p.pos = 0;
+      if (p.live && p.onLive) await seek(Math.max(0, p.duration - LIVE_BACK));
       await invoke('player_play');
       p.playing = true;
       p.buffering = true;
@@ -553,6 +685,14 @@ async function seek(t) {
   const p = S.p;
   if (!p.loaded) return;
   const to = Math.max(0, p.duration ? Math.min(t, p.duration) : t);
+  p.onLive = false;
+  // Only looked at: the playhead moves here, the player plays on
+  if (p.view) {
+    Object.assign(p, { pos: to, at: performance.now() });
+    S.shownSec = -1;
+    kick();
+    return;
+  }
   S.actionAt = performance.now();
   Object.assign(p, { pos: to, at: performance.now(), buffering: true, ended: false });
   S.shownSec = -1;
@@ -568,11 +708,27 @@ async function poll() {
   let st;
   try { st = await invoke('player_state'); } catch { return; }
   if (S.fxPath && !st.fx && performance.now() - S.fxSince > 500) { S.fxPath = null; repaintFx(); }
+  // What the player has, whichever Space is shown: for the tags' dots
+  const had = S.player;
+  S.player = { url: st.loaded ? st.url : '', playing: st.playing, live: st.live };
+  const src = S.sources.find(x => x.url === S.player.url);
+  if (src && src.isLive !== st.live) src.isLive = st.live;
+  if (src && (had.url !== S.player.url || had.playing !== st.playing || had.live !== st.live)) { renderTags(); showPlaying(); }
   const p = S.p;
-  if (sent < S.actionAt || !p.loaded || st.url !== p.url) return;
-  const changed = p.playing !== st.playing || p.buffering !== st.buffering || p.error !== (st.error || '');
-  Object.assign(p, { pos: st.pos, at: performance.now(), playing: st.playing, buffering: st.buffering, ended: st.ended, error: st.error || '' });
-  if (changed) { showPlaying(); renderMsg(); }
+  if (sent < S.actionAt || !p.loaded || p.view || st.url !== p.url) return;
+  const changed = p.playing !== st.playing || p.buffering !== st.buffering || p.error !== (st.error || '') || p.live !== st.live;
+  // A Space on air grows as it plays
+  const grew = Math.abs(p.duration - st.duration) > 0.01;
+  Object.assign(p, { pos: st.pos, at: performance.now(), playing: st.playing, buffering: st.buffering, ended: st.ended, error: st.error || '', live: st.live, duration: st.duration });
+  if (grew) {
+    $('#dur').textContent = `/ ${fmt(p.duration)}`;
+    S.shownPx = -1;
+    S.shownBand = null;
+    renderRegions();
+  }
+  if (changed) { showPlaying(); renderPlayer(); }
+  // While it plays, each new second does this (see `frame`)
+  else if (p.live && !p.playing) { renderLive(); renderMsg(); }
   kick();
 }
 
@@ -581,10 +737,10 @@ function showPlaying() {
   const p = S.p;
   ui.play.innerHTML = p.playing ? ICON.pause : ICON.play;
   const dot = $('#liveDot');
-  dot.classList.toggle('hidden', !p.loaded || !active());
+  dot.classList.toggle('hidden', p.live || !p.loaded || !active());
   dot.classList.toggle('on', p.playing && !p.buffering);
-  // The logo's dots become a sound meter while a Space plays
-  document.body.classList.toggle('playing', p.playing && !p.buffering);
+  // The logo's dots become a sound meter while a Space plays, even one heard from another tag
+  document.body.classList.toggle('playing', (p.playing && !p.buffering) || (p.view && S.player.playing));
 }
 
 /** Asks the player often while it plays or loads, and rarely while it sits still. */
@@ -609,7 +765,11 @@ function frame() {
   const p = S.p;
   const pos = currentPos();
   const sec = Math.floor(pos);
-  if (sec !== S.shownSec) { S.shownSec = sec; ui.pos.textContent = fmt(sec); }
+  if (sec !== S.shownSec) {
+    S.shownSec = sec;
+    ui.pos.textContent = fmt(sec);
+    if (p.live) { renderLive(); renderMsg(); }
+  }
   // Touch the page only when the playhead moves a whole pixel
   const w = ui.bar.clientWidth;
   const px = p.duration ? Math.round((pos / p.duration) * w) : 0;
@@ -637,7 +797,16 @@ function frame() {
       ui.pending.style.width = `${px - from}px`;
     }
   }
-  if ((p.playing && !p.buffering) || S.drag) kick();
+  if (S.drag) { kick(); return; }
+  // Playing, the page only changes with a new second or a pixel more of the
+  // bar: wake for that, not on every frame
+  if (p.playing && !p.buffering) {
+    const toSec = Math.floor(pos) + 1 - pos;
+    const toPx = p.duration && w ? ((px + 0.5) / w) * p.duration - pos : toSec;
+    const wait = Math.max(0.016, Math.min(toSec, toPx) / (S.speed || 1));
+    clearTimeout(S.frameTimer);
+    S.frameTimer = setTimeout(kick, wait * 1000);
+  }
 }
 new ResizeObserver(() => { S.shownPx = -1; S.shownBand = null; kick(); }).observe(ui.bar);
 
@@ -676,7 +845,7 @@ function renderRegions() {
 }
 
 function markStart() {
-  if (!S.p.loaded) return;
+  if (!S.p.loaded || S.p.view) return;
   const t = Math.round(currentPos());
   const c = freshClip();
   touched(c);
@@ -1304,6 +1473,7 @@ for (const [id, dir] of [['#back', -1], ['#fwd', 1]]) {
   btn.addEventListener('click', e => { if (e.detail === 0) skip(dir, true); });
 }
 $('#mark').addEventListener('click', toggleMark);
+$('#livePill').addEventListener('click', goLive);
 
 // Playback speed: one button, each click moves to the next speed
 const SPEEDS = [1, 1.25, 1.5, 2, 0.5];
@@ -1505,6 +1675,31 @@ document.addEventListener('keydown', e => {
   else if (key === ']' || key === 'o') { e.preventDefault(); markEnd(); }
   else if (key === 'm') { e.preventDefault(); toggleMark(); }
 }, true);
+
+/* ── Spaces on air ──────────────────────────────────── */
+
+/** Once a minute the bar of a Space on air shown while another one plays
+ *  catches up (a fresh replay, so not more often), and the other Spaces on
+ *  air are asked, by their small live lists, whether they still are. */
+async function checkLive() {
+  const s = active();
+  if (s && S.p.view && S.p.live && S.p.loaded) {
+    const info = await invoke('space_info', { url: s.url, live: s.live || null }).catch(() => null);
+    if (info && S.p.url === s.url && S.p.view) {
+      Object.assign(S.p, { duration: info.duration, live: info.live });
+      Object.assign(s, { duration: info.duration, isLive: info.live, checkedAt: performance.now() });
+      renderTags();
+      renderPlayer();
+      renderRegions();
+    }
+  }
+  const others = S.sources.filter(x => x.isLive && x.url !== S.player.url && !(S.p.view && x.id === S.active));
+  for (const x of others) {
+    const on = await invoke('space_live', { url: x.url, live: x.live || null }).catch(() => null);
+    if (on === false) { x.isLive = false; renderTags(); }
+  }
+}
+setInterval(checkLive, 60000);
 
 /* ── Start ──────────────────────────────────────────── */
 

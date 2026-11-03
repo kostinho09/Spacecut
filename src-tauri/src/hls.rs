@@ -256,6 +256,9 @@ fn at_live(mut list: Playlist, base: &str) -> Playlist {
     list
 }
 
+/// Where the live stream of a Space kept its pieces before 31 Oct 2026.
+const OLD_LIVE: &str = "periscope-replay-direct";
+
 /// Where X keeps Space replays now, under each Space's own key; any playlist
 /// number opens the whole list there.
 const REPLAYS: &str = "non_transcode/pdxa/periscope-replays-public";
@@ -286,7 +289,7 @@ pub fn resolve(url: &str, live: Option<&str>) -> Result<Playlist, String> {
 
 /// Where a Space's audio was found, so the player (on every load) and each
 /// clip of a cut don't look again. A finished recording is kept for good; one
-/// still live for a minute, as its list keeps growing.
+/// still live for a few seconds, as its list keeps growing.
 struct Found {
     list: Playlist,
     at: Instant,
@@ -308,21 +311,91 @@ fn remember(url: &str, live: Option<&str>, list: &Playlist) {
 fn recall(url: &str, live: Option<&str>) -> Option<Playlist> {
     let found = found().lock().unwrap();
     let hit = found.get(&key(url, live))?;
-    (hit.list.ended || hit.at.elapsed() < Duration::from_secs(60)).then(|| hit.list.clone())
+    (hit.list.ended || hit.at.elapsed() < Duration::from_secs(5)).then(|| hit.list.clone())
 }
 
 fn find(url: &str, live: Option<&str>) -> Result<Playlist, String> {
     // Any link of a Space (a replay, say) tells its key and folder
-    let derived = dynamic_of(url);
-    let Some(dynamic) = live.filter(|d| live_base(d).is_some()).or(derived.as_deref()) else {
+    let Some(dynamic) = dynamic_for(url, live) else {
         return load_playlist(url);
     };
+    // The replay of a Space still live says it has ended all the same
+    let on_air = matches!(check_live(&dynamic), LiveCheck::On(_));
+    let mut list = search(url, &dynamic, on_air)?;
+    if on_air {
+        list.ended = false;
+    }
+    Ok(list)
+}
+
+/// The dynamic link of a Space: the one given, or the one beside its other links.
+pub fn dynamic_for(url: &str, live: Option<&str>) -> Option<String> {
+    live.filter(|d| live_base(d).is_some()).map(str::to_string).or_else(|| dynamic_of(url))
+}
+
+/// A piece the live list names: its number, length and file name.
+pub struct LivePiece {
+    pub seq: u64,
+    pub dur: f64,
+    pub name: String,
+}
+
+pub enum LiveCheck {
+    /// On air, with the latest pieces.
+    On(Vec<LivePiece>),
+    Over,
+    /// No answer, or a link that can't tell.
+    Unknown,
+}
+
+/// The number in a piece's name: `chunk_<time>_<number>_a.aac`.
+pub fn piece_number(url: &str) -> Option<u64> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"_(\d+)_[a-z]\.aac").unwrap());
+    re.captures(url.split('?').next()?.rsplit('/').next()?)?.get(1)?.as_str().parse().ok()
+}
+
+/// Whether a Space is on air, from its live list, which holds only its last
+/// few pieces (a replay asked for meanwhile ends the same way a finished one does).
+pub fn check_live(dynamic: &str) -> LiveCheck {
+    // Spaces in the old place (until 30 Oct 2026) are long over, and their
+    // server (eu-central) can take seconds to answer at all
+    if dynamic.contains(REPLAYS) || dynamic.contains(OLD_LIVE) || live_base(dynamic).is_none() {
+        return LiveCheck::Unknown;
+    }
+    let text = match agent().get(dynamic).timeout(Duration::from_secs(5)).call() {
+        Ok(r) => r.into_string().unwrap_or_default(),
+        Err(ureq::Error::Status(404 | 410, _)) => return LiveCheck::Over,
+        Err(_) => return LiveCheck::Unknown,
+    };
+    if !text.contains("#EXTM3U") {
+        return LiveCheck::Unknown;
+    }
+    if text.contains("#EXT-X-ENDLIST") {
+        return LiveCheck::Over;
+    }
+    let mut pieces = Vec::new();
+    let mut dur = None;
+    for line in text.lines().map(str::trim) {
+        if let Some(rest) = line.strip_prefix("#EXTINF:") {
+            dur = rest.split(',').next().and_then(|d| d.trim().parse().ok());
+        } else if !line.is_empty() && !line.starts_with('#') {
+            if let (Some(d), Some(seq)) = (dur.take(), piece_number(line)) {
+                pieces.push(LivePiece { seq, dur: d, name: line.split('?').next().unwrap_or(line).to_string() });
+            }
+        }
+    }
+    LiveCheck::On(pieces)
+}
+
+fn search(url: &str, dynamic: &str, on_air: bool) -> Result<Playlist, String> {
     let plays = |list: &Playlist| list.segments.first().is_some_and(opens);
     let mut error = None;
     // A list of the pieces, wherever their audio turns out to be
     let mut names = None;
-    // A pdxa link as given is tried as it is, before asking again under a new number
-    let as_given = url.contains(REPLAYS).then(|| url.to_string());
+    // A pdxa link as given is tried as it is, before asking again under a new
+    // number; not while live, when it holds only the Space up to when it was made
+    let as_given = (url.contains(REPLAYS) && !on_air).then(|| url.to_string());
     for candidate in as_given.into_iter().chain(archive_of(dynamic).map(|a| on_hosts(&a)).unwrap_or_default()) {
         match load_playlist(&candidate) {
             Ok(mut list) if plays(&list) => {
@@ -475,6 +548,24 @@ mod tests {
     }
 
     /// The user's own example: these two links, in this order.
+    /// Needs a Space that was on air and is over now: OVER_URL='https://…/dynamic_playlist.m3u8?type=live'.
+    #[test]
+    #[ignore]
+    fn knows_a_space_is_over() {
+        let dynamic = std::env::var("OVER_URL").expect("set OVER_URL to the dynamic link of a Space that has ended");
+        assert!(matches!(check_live(&dynamic), LiveCheck::Over));
+        let list = resolve(&live_to_replay(&dynamic).unwrap(), Some(&dynamic)).unwrap();
+        println!("{} pieces, {:.0} s, ended: {}", list.segments.len(), list.duration, list.ended);
+        assert!(list.ended);
+    }
+
+    #[test]
+    fn reads_the_number_of_a_piece() {
+        assert_eq!(piece_number("https://h/a/chunk_1793688216796384610_2571_b.aac?type=live"), Some(2571));
+        assert_eq!(piece_number("chunk_1793680508649668229_0_b.aac"), Some(0));
+        assert_eq!(piece_number("https://h/a/playlist_1665.m3u8"), None);
+    }
+
     #[test]
     fn makes_both_replay_forms_exactly() {
         let dynamic = "https://prod-fastly-a.video.pscp.tv/Transcoding/v1/hls/EXAMPLE_SPACE_KEY/non_transcode/atla/x-media-live-stream-atla/audio-space/dynamic_playlist.m3u8?type=live";

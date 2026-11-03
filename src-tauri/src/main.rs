@@ -134,6 +134,42 @@ async fn player_load(state: State<'_, AppState>, url: String, live: Option<Strin
     blocking(move || player.load(&url, live.as_deref())).await?
 }
 
+#[derive(Serialize)]
+struct SpaceInfo {
+    duration: f64,
+    live: bool,
+}
+
+/// How long a Space (or file) is, and whether it is on air, without loading
+/// it into the player: for one looked at while another plays.
+#[tauri::command]
+async fn space_info(state: State<'_, AppState>, url: String, live: Option<String>) -> Result<SpaceInfo, String> {
+    let ffmpeg = state.ffmpeg.clone();
+    blocking(move || {
+        if hls::is_m3u8(&url) {
+            let list = hls::resolve(&url, live.as_deref())?;
+            Ok(SpaceInfo { duration: list.duration, live: !list.ended })
+        } else {
+            let duration = ffmpeg.and_then(|ff| ffmpeg::probe_duration(&ff, &url)).unwrap_or(0.0);
+            Ok(SpaceInfo { duration, live: false })
+        }
+    })
+    .await?
+}
+
+/// Whether a Space is still on air; None without an answer.
+#[tauri::command]
+async fn space_live(url: String, live: Option<String>) -> Result<Option<bool>, String> {
+    blocking(move || {
+        hls::dynamic_for(&url, live.as_deref()).and_then(|d| match hls::check_live(&d) {
+            hls::LiveCheck::On(_) => Some(true),
+            hls::LiveCheck::Over => Some(false),
+            hls::LiveCheck::Unknown => None,
+        })
+    })
+    .await
+}
+
 #[tauri::command]
 fn player_play(state: State<AppState>) -> Result<(), String> {
     state.player.play()
@@ -291,6 +327,8 @@ fn main() {
             clipboard_write,
             convert_live,
             player_load,
+            space_info,
+            space_live,
             player_play,
             player_pause,
             player_seek,
