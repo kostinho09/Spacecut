@@ -151,6 +151,17 @@ fn live_of(row: &Row) -> Option<&str> {
     Some(row.live.trim()).filter(|l| !l.is_empty())
 }
 
+/// Why a clip can't be cut from a Space when it starts where the Space has
+/// ended (or, still live, hasn't got to yet); None when it starts within it.
+fn past_the_end(list: &hls::Playlist, start: u64) -> Option<String> {
+    let end = list.segments.last().map(|s| s.start + s.dur)?;
+    if (start as f64) < end {
+        return None;
+    }
+    let at = fmt_hms(end as u64);
+    Some(if list.ended { format!("starts after the Space ends ({at})") } else { format!("starts after where the live Space has got to ({at})") })
+}
+
 /// Whether a Space is cut from its pieces fetched several at a time; tests
 /// turn it off to compare with ffmpeg reading the list itself.
 fn in_parallel() -> bool {
@@ -407,6 +418,13 @@ impl Worker<'_> {
 
         // A Space (or a local .m4a/.ts/.aac): copy through an MPEG-TS file
         let space = (!local && hls::is_m3u8(url)).then(|| hls::resolve(url, live_of(row)).ok()).flatten();
+        // ffmpeg would give the start of the Space instead
+        if let (Some(list), Some((s0, _))) = (&space, span) {
+            if let Some(reason) = past_the_end(list, s0) {
+                (self.emit)("job-status", json!({ "id": id, "status": "Past the End", "reason": reason }));
+                return None;
+            }
+        }
         // Its pieces fetched several at a time (see `fetch`); should that not
         // work out, ffmpeg reads the list itself, as it always did
         if let Some(list) = space.as_ref().filter(|_| in_parallel()) {
@@ -989,6 +1007,21 @@ mod tests {
         assert_eq!(one, Some(true));
         assert!(got > 56.0 && got < 60.5, "{got} s");
         assert_eq!(many, Some(false));
+    }
+
+    #[test]
+    fn refuses_a_clip_that_starts_after_the_space() {
+        let list = |ended| hls::Playlist {
+            segments: (0..3).map(|i| hls::Segment { start: i as f64 * 3.0, dur: 3.0, url: String::new() }).collect(),
+            duration: 9.0,
+            started: None,
+            url: String::new(),
+            moved: false,
+            ended,
+        };
+        assert_eq!(past_the_end(&list(true), 8), None, "it starts in the last piece");
+        assert_eq!(past_the_end(&list(true), 9).as_deref(), Some("starts after the Space ends (00:00:09)"));
+        assert_eq!(past_the_end(&list(false), 60).as_deref(), Some("starts after where the live Space has got to (00:00:09)"));
     }
 
     #[test]

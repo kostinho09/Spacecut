@@ -138,6 +138,7 @@ const STATUS = {
   'Cut Error': ['bad', 'bad', 'Cut error'],
   'Convert Error': ['bad', 'bad', 'Convert error'],
   'Invalid Time': ['bad', 'bad', 'The end has to come after the start'],
+  'Past the End': ['bad', 'bad', 'Starts after the Space ends'],
   'FFmpeg Not Found': ['bad', 'bad', 'FFmpeg not found'],
 };
 
@@ -1164,7 +1165,13 @@ async function startCut() {
   if (!rows.length) return;
   if (!S.env.ffmpeg) { setStatus('FFmpeg not found', 'bad'); return; }
   // Nothing is saved anywhere the user hasn't chosen
-  if (!S.env.output_folder && !(await chooseFolder())) return;
+  if (!S.env.output_folder && !(await chooseFolder())) {
+    // Cancelled: say why nothing happened, for a moment
+    const why = 'Choose a folder to save the clips';
+    setStatus(why);
+    setTimeout(() => { if ($('#status').textContent === why) setStatus(''); }, 3000);
+    return;
+  }
   S.clips.forEach(c => { c.status = 'Pending'; });
   const jingles = {};
   if (S.join) {
@@ -1206,8 +1213,9 @@ listen('job-status', ({ payload }) => {
     Cutting: `${where} — cutting…`, Converting: `${where} — converting…`, Done: `${where} — done`,
     'Cut Error': `${where} — ${c.reason || 'cut error'}`, 'Convert Error': `${where} — ${c.reason || 'convert error'}`,
     'Invalid Time': `${where} — the end comes before the start`, 'FFmpeg Not Found': 'FFmpeg not found',
+    'Past the End': `${where} — ${c.reason}`,
   }[payload.status];
-  if (msg) setStatus(msg, payload.status.includes('Error') || payload.status.includes('Invalid') ? 'bad' : '');
+  if (msg) setStatus(msg, ['Error', 'Invalid', 'Past'].some(w => payload.status.includes(w)) ? 'bad' : '');
 });
 
 listen('job-slow', ({ payload }) => {
