@@ -4,6 +4,7 @@ mod cutter;
 mod fetch;
 mod ffmpeg;
 mod hls;
+mod media;
 mod player;
 mod prefs;
 mod update;
@@ -36,6 +37,8 @@ struct Env {
     effects: Vec<prefs::Effect>,
     lang: String,
     theme: String,
+    /// Whether to ask GitHub once a day for a newer version.
+    update_check: bool,
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
@@ -61,6 +64,7 @@ fn env_info(app: AppHandle, state: State<AppState>) -> Env {
         effects: prefs::load_effects(),
         lang: p.get("lang").and_then(Value::as_str).unwrap_or("en").to_string(),
         theme: p.get("theme").and_then(Value::as_str).unwrap_or("auto").to_string(),
+        update_check: p.get("update_check").and_then(Value::as_bool).unwrap_or(true),
     }
 }
 
@@ -253,6 +257,12 @@ fn set_mini(window: tauri::WebviewWindow, state: State<AppState>, on: bool, heig
     Ok(())
 }
 
+/// What plays, for the system's Now Playing and media keys.
+#[tauri::command]
+fn media_now(app: AppHandle, now: media::NowPlaying) {
+    media::show(&app, now);
+}
+
 #[tauri::command]
 fn player_play(state: State<AppState>) -> Result<(), String> {
     state.player.play()
@@ -399,6 +409,7 @@ fn main() {
             });
             #[cfg(target_os = "macos")]
             add_update_item(app.handle())?;
+            media::start(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -417,6 +428,7 @@ fn main() {
             player_play,
             player_go_live,
             set_mini,
+            media_now,
             player_pause,
             player_seek,
             player_state,

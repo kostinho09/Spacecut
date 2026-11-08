@@ -10,7 +10,7 @@ use serde_json::{json, Map, Value};
 
 use crate::prefs;
 
-const REPO: &str = "kostinho09/SpaceCutter";
+const REPO: &str = "kostinho09/Spacecut";
 const DAY: u64 = 24 * 60 * 60;
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -90,9 +90,19 @@ fn compare(latest: Option<String>, current: &str) -> Found {
     }
 }
 
-/// A newer version to point the user to, if there is one.
+/// The user turned the daily check off (in the help window).
+fn turned_off(prefs: &Map<String, Value>) -> bool {
+    prefs.get("update_check").and_then(Value::as_bool) == Some(false)
+}
+
+/// A newer version to point the user to, if there is one. With the check
+/// turned off, GitHub is not asked at all.
 pub fn check(current: &str) -> Option<Update> {
-    let last = prefs::load().get("update_checked").and_then(Value::as_u64);
+    let saved = prefs::load();
+    if turned_off(&saved) {
+        return None;
+    }
+    let last = saved.get("update_checked").and_then(Value::as_u64);
     if last.is_none_or(|t| now().saturating_sub(t) >= DAY) {
         // Without an answer (no internet, say) it tries again next time
         if let Some(tag) = latest_release() {
@@ -129,6 +139,16 @@ pub fn open(url: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn asks_unless_turned_off() {
+        let mut p = Map::new();
+        assert!(!turned_off(&p), "on until the user turns it off");
+        p.insert("update_check".into(), json!(true));
+        assert!(!turned_off(&p));
+        p.insert("update_check".into(), json!(false));
+        assert!(turned_off(&p));
+    }
+
     fn prefs(latest: &str, dismissed: Option<&str>) -> Map<String, Value> {
         let mut p = Map::new();
         p.insert("update_latest".into(), json!(latest));
@@ -150,7 +170,7 @@ mod tests {
     #[test]
     fn tells_only_of_newer_versions_not_hidden() {
         let newer = decide(&prefs("v2.1.0", None), "2.0.0").expect("2.1.0 is newer");
-        assert_eq!(newer.url, "https://github.com/kostinho09/SpaceCutter/releases/tag/v2.1.0");
+        assert_eq!(newer.url, "https://github.com/kostinho09/Spacecut/releases/tag/v2.1.0");
         assert_eq!(decide(&prefs("v1.1.1", None), "2.0.0"), None, "older");
         assert_eq!(decide(&prefs("v2.0.0", None), "2.0.0"), None, "the same");
         assert_eq!(decide(&prefs("v2.1.0", Some("v2.1.0")), "2.0.0"), None, "hidden");
@@ -160,7 +180,7 @@ mod tests {
 
     #[test]
     fn the_menu_tells_what_it_found_even_if_hidden() {
-        let newer = Update { version: "v2.1.0".into(), url: "https://github.com/kostinho09/SpaceCutter/releases/tag/v2.1.0".into() };
+        let newer = Update { version: "v2.1.0".into(), url: "https://github.com/kostinho09/Spacecut/releases/tag/v2.1.0".into() };
         assert_eq!(compare(Some("v2.1.0".into()), "2.0.0"), Found::Newer(newer));
         assert_eq!(compare(Some("v1.1.1".into()), "2.0.0"), Found::UpToDate, "the newest release is older");
         assert_eq!(compare(Some("v2.0.0".into()), "2.0.0"), Found::UpToDate);

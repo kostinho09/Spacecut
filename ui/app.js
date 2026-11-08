@@ -87,7 +87,7 @@ const savePref = (key, value) => invoke('set_pref', { key, value }).catch(() => 
 /* ── State ──────────────────────────────────────────── */
 
 const S = {
-  env: { platform: 'macos', ffmpeg: true, output_folder: '', effects: [], lang: 'en', theme: 'auto' },
+  env: { platform: 'macos', ffmpeg: true, output_folder: '', effects: [], lang: 'en', theme: 'auto', update_check: true },
   sources: [],      // { id, url, local, name, color, include, lastPos }
   clips: [],        // { id, src, name, full, start, end, status, auto }
   nextId: 1,
@@ -520,7 +520,7 @@ function pendingClip() {
 }
 
 function showDur() {
-  $('#dur').textContent = `/ ${fmt(S.p.duration)}`;
+  $('#dur').textContent = fmt(S.p.duration);   // the "/" before it is drawn by the style, not in the mini player
 }
 
 /** The big time: where the playhead is, or, clicked, what is left until the end (as on YouTube). */
@@ -801,6 +801,8 @@ async function poll() {
   S.player = { url: st.loaded ? st.url : '', playing: st.playing, live: st.live };
   const src = S.sources.find(x => x.url === S.player.url);
   if (src && src.isLive !== st.live) src.isLive = st.live;
+  S.heard = st;
+  nowPlaying(st, src);
   if (src && (had.url !== S.player.url || had.playing !== st.playing || had.live !== st.live)) { renderTags(); showPlaying(); }
   const p = S.p;
   if (sent < S.actionAt || !p.loaded || p.view || st.url !== p.url) return;
@@ -823,6 +825,48 @@ async function poll() {
   else if (p.live && !p.playing) { renderLive(); renderMsg(); }
   kick();
 }
+
+/* ── The system's Now Playing and media keys ───────── */
+
+/** Tells the system what plays: the heard Space's name, where it has got to,
+ *  and whether it plays. Sent when any of that changes, and every few
+ *  seconds while it plays so that the system's own count keeps in step (it
+ *  counts on at 1×, and the speed may differ). */
+function nowPlaying(st, src) {
+  const now = st.loaded && src
+    ? { title: src.name, artist: st.live ? 'Live · Spacecut' : 'Spacecut', duration: st.live ? null : st.duration, position: st.pos, playing: st.playing && !st.buffering, stopped: false }
+    : { stopped: true };
+  const key = JSON.stringify({ ...now, position: 0 });
+  const at = performance.now();
+  const jumped = S.np && Math.abs(st.pos - (S.np.pos + (S.np.playing ? (at - S.np.at) / 1000 : 0))) > 2;
+  if (S.np && S.np.key === key && !jumped && !(now.playing && at - S.np.at > 4000)) return;
+  S.np = { key, at, pos: st.pos || 0, playing: now.playing };
+  invoke('media_now', { now }).catch(() => {});
+}
+
+/** A system button or media key: the app's own commands for the Space shown,
+ *  or the player's for one heard from another tag (so that a pause from the
+ *  headphones never switches the player to the tag that is shown). */
+listen('media-control', ({ payload }) => {
+  const p = S.p, heard = S.heard;
+  const own = p.loaded && !p.view && heard && heard.url === p.url;
+  if (typeof payload === 'object' && payload && 'position' in payload) {
+    if (own) seek(payload.position);
+    else if (heard?.loaded) invoke('player_seek', { t: payload.position }).then(pollSoon, () => {});
+    return;
+  }
+  const playing = own ? p.playing : !!heard?.playing;
+  if (payload === 'forward' || payload === 'back') {
+    const dir = payload === 'forward' ? 1 : -1;
+    if (own) skip(dir, true);
+    else if (heard?.loaded) invoke('player_seek', { t: Math.max(0, heard.pos + 10 * dir) }).then(pollSoon, () => {});
+    return;
+  }
+  const want = payload === 'toggle' ? !playing : payload === 'play';
+  if (want === playing) return;
+  if (own) togglePlay();
+  else if (heard?.loaded) invoke(want ? 'player_play' : 'player_pause').then(pollSoon, () => {});
+});
 
 /** The play button, and the Space's mark by the time: moving while it plays. */
 function showPlaying() {
@@ -1733,9 +1777,29 @@ function openHelp(chapter = 'link') {
   const close = modal(h('div', {},
     h('div', { class: 'm-head' }, h('div', { class: 'mode chapters' }, a, b)),
     text,
-    h('div', { class: 'm-actions' }, h('button', { class: 'main', onclick: () => close() }, 'OK'))));
+    h('div', { class: 'm-actions upd' }, updateSwitch(), h('button', { class: 'main', onclick: () => close() }, 'OK'))));
   paint();
 }
+
+/** The daily check for a newer version, on or off, and what it does: it
+ *  only tells, and the new version is downloaded by hand from GitHub. */
+function updateSwitch() {
+  const box = h('input', { type: 'checkbox' });
+  box.checked = S.env.update_check !== false;
+  box.addEventListener('change', () => {
+    S.env.update_check = box.checked;
+    invoke('set_pref', { key: 'update_check', value: box.checked }).catch(() => {});
+    if (box.checked) checkUpdate();
+    else $('#update').classList.add('hidden');
+  });
+  const link = h('a', { href: '#', onclick: e => { e.preventDefault(); invoke('open_update', { url: RELEASES }).catch(() => {}); } },
+    'github.com/kostinho09/Spacecut/releases');
+  return h('div', { class: 'upd-set' },
+    h('label', { class: 'switch' }, box, h('span'), 'Check for updates'),
+    h('div', { class: 'upd-note' },
+      'Nothing downloads automatically. New versions are announced at the top, and you download them manually from ', link, '.'));
+}
+const RELEASES = 'https://github.com/kostinho09/Spacecut/releases/latest';
 $('#help').addEventListener('click', () => openHelp('link'));
 
 // Only text fields keep the system menu (cut, copy, paste)

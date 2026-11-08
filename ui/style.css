@@ -135,14 +135,40 @@ svg { display: block; }
 body.mini .source, body.mini #clips, body.mini #mergeBox, body.mini .bottom,
 body.mini #update, body.mini #theme, body.mini #help { display: none !important; }
 body.mini main { overflow: hidden; padding-top: 0; padding-bottom: 12px; }
-body.mini .top { height: 40px; }
-body.mini .tagline { margin-top: 0; }
+body.mini .top { height: 34px; }
+body.mini .tagline { margin-top: 0; min-height: 26px; }
+/* Slim, to keep open: the time and the length the same size on either side
+   of the bar, then Mark on the left and small buttons on the right. The
+   player's own boxes give way (display: contents) so that its parts can be
+   laid out afresh; the full window is untouched. */
+body.mini .tags { gap: 6px; }
+body.mini .tag { height: 26px; padding: 0 11px; font-size: 12px; gap: 6px; }
+body.mini .tag .tcopy { width: 20px; height: 20px; margin-right: -6px; }
+body.mini .tag .tcopy svg { width: 12px; height: 12px; }
+body.mini .player { display: flex; flex-wrap: wrap; align-items: center; gap: 0 8px; margin-top: 8px; }
+body.mini .deck, body.mini .clock, body.mini .transport, body.mini .markrow { display: contents; }
+body.mini #pos, body.mini #dur { order: 1; min-width: 54px; margin: 0; font-size: 12.5px; font-weight: 600; letter-spacing: 0; }
+body.mini #dur { order: 4; text-align: right; }
+body.mini #dur::before { content: none; }
+body.mini #liveDot { display: none !important; }
+body.mini .bar { order: 3; flex: 1; height: 22px; margin: 0 6px; }
+body.mini .player::after { content: ""; order: 5; flex-basis: 100%; height: 8px; }
+body.mini #mark { order: 6; height: 28px; padding: 0 12px; font-size: 12px; }
+body.mini #msg { order: 7; flex: 1; visibility: hidden; }
+body.mini #livePill { order: 8; margin: 0; vertical-align: 0; padding: 3px 7px 3px 6px; font-size: 10px; }
+body.mini #speed { order: 9; min-width: 34px; height: 24px; margin: 0; padding: 0 6px; font-size: 11.5px; }
+body.mini #back { order: 10; } body.mini #play { order: 11; } body.mini #fwd { order: 12; }
+body.mini .skip { width: 30px; height: 30px; }
+body.mini .skip svg { width: 24px; height: 24px; }
+body.mini #play.round { width: 34px; height: 34px; }
+body.mini #play.round svg { width: 14px; height: 14px; }
 body.mini #logoScissors { display: none; }
 /* Only in the mini player, on the right: back to the full window */
 #fullBtn { display: none; }
 body.mini #fullBtn { display: inline-grid; }
 /* The logo's dots switch the mini player on and off: a hand-sized spot */
-.dots.logo { padding: 8px 4px; margin: -8px -4px; cursor: default; }
+.dots.logo { padding: 8px 7px; margin: -8px -7px; border-radius: 999px; cursor: default; transition: background .15s; }
+.dots.logo:hover { background: var(--hover); }
 
 /* ── Top ────────────────────────────────────────────── */
 .top {
@@ -260,6 +286,7 @@ main { flex: 1; overflow-y: auto; padding: 4px 18px 10px; }
 }
 #pos { font-size: 27px; font-weight: 700; letter-spacing: -.3px; }
 #dur { margin-left: 7px; font-size: 13px; font-weight: 600; color: var(--mu); }
+#dur::before { content: "/ "; }
 /* The open Space's mark beside the time: still while paused, blinking or
    moving while it plays; a click turns the dot into bars and back */
 .live-dot {
@@ -521,3 +548,9 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 16px;
 .chapters button { width: auto; padding: 0 14px; font-size: 13px; font-weight: 700; }
 .m-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .m-actions .main { height: 36px; padding: 0 18px; font-size: 13px; }
+/* The help window's switch for the update check, and what it does */
+.m-actions.upd { justify-content: space-between; align-items: center; gap: 18px; }
+.upd-set { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.upd-note { font-size: 12px; line-height: 1.4; color: var(--mu); }
+.upd-note a { color: inherit; text-decoration: underline; cursor: pointer; }
+.upd-note a:hover { color: var(--fg); }
