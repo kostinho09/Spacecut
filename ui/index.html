@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Space Cutter</title>
+  <title>Spacecut</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <header class="top" data-tauri-drag-region>
-    <span class="brand" data-tauri-drag-region title="Space Cutter"><span class="mark-logo"><span id="logoScissors" class="logo-scis"></span><span class="dots logo"><i></i><i></i><i></i></span></span></span>
+    <span class="brand" data-tauri-drag-region title="Spacecut"><span class="mark-logo"><span id="logoScissors" class="logo-scis"></span><span class="dots logo"><i></i><i></i><i></i></span></span></span>
     <div class="grow" data-tauri-drag-region></div>
     <span id="update" class="update hidden"><button class="upd-open"></button><button class="upd-close" title="Hide until the next version" aria-label="Hide"></button></span>
     <div class="mode" id="theme">
@@ -17,6 +17,7 @@
       <button data-theme="dark" title="Dark"></button>
     </div>
     <button id="help" class="soft small help">How to get the dynamic link</button>
+    <button id="fullBtn" class="icon" title="Back to the full window" aria-label="Back to the full window"></button>
   </header>
 
   <main>
@@ -34,7 +35,7 @@
 
     <section class="player">
       <div class="deck">
-        <div class="clock"><span id="pos">00:00:00</span><span id="dur">/ 00:00:00</span><span id="liveDot" class="live-dot hidden"></span><button id="livePill" class="live-pill hidden"></button></div>
+        <div class="clock"><span id="pos">00:00:00</span><span id="dur">/ 00:00:00</span><span id="liveDot" class="live-dot hidden"><span class="dot"></span><span class="wave"><i></i><i></i><i></i></span></span><button id="livePill" class="live-pill hidden"></button></div>
         <div class="transport">
           <button id="speed" class="speed" title="Playback speed: click for the next one">1×</button>
           <button id="back" class="skip" title="10 seconds back (←)" aria-label="10 seconds back"></button>

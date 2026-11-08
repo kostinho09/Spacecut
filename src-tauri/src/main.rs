@@ -23,6 +23,8 @@ struct AppState {
     ffmpeg: Option<PathBuf>,
     player: Arc<player::Player>,
     job: Arc<cutter::Control>,
+    /// The window's size before it became the mini player.
+    full_size: std::sync::Mutex<Option<tauri::LogicalSize<f64>>>,
 }
 
 #[derive(Serialize)]
@@ -138,6 +140,8 @@ async fn player_load(state: State<'_, AppState>, url: String, live: Option<Strin
 struct SpaceInfo {
     duration: f64,
     live: bool,
+    /// Where live is now, for a Space on air: its length plus what came out since.
+    edge: f64,
 }
 
 /// How long a Space (or file) is, and whether it is on air, without loading
@@ -147,12 +151,37 @@ async fn space_info(state: State<'_, AppState>, url: String, live: Option<String
     let ffmpeg = state.ffmpeg.clone();
     blocking(move || {
         if hls::is_m3u8(&url) {
-            let list = hls::resolve(&url, live.as_deref())?;
-            Ok(SpaceInfo { duration: list.duration, live: !list.ended })
+            let list = hls::resolve_known(&url, live.as_deref())?;
+            let since = list.ends_at.map_or(0.0, |t| (now_secs() - t).max(0.0));
+            let edge = if list.ended { list.duration } else { list.duration + since };
+            Ok(SpaceInfo { duration: list.duration, live: !list.ended, edge })
         } else {
             let duration = ffmpeg.and_then(|ff| ffmpeg::probe_duration(&ff, &url)).unwrap_or(0.0);
-            Ok(SpaceInfo { duration, live: false })
+            Ok(SpaceInfo { duration, live: false, edge: duration })
         }
+    })
+    .await?
+}
+
+#[derive(Serialize)]
+struct Fresh {
+    url: String,
+    duration: f64,
+    edge: f64,
+}
+
+/// A replay link of a Space on air made now, holding all that is out: what
+/// Copy gives. The bar grows to it too.
+#[tauri::command]
+async fn fresh_replay(state: State<'_, AppState>, url: String, live: Option<String>) -> Result<Fresh, String> {
+    let player = state.player.clone();
+    blocking(move || {
+        let dynamic = hls::dynamic_for(&url, live.as_deref()).ok_or("not a Space")?;
+        let list = hls::replay_now(&dynamic).or_else(|_| hls::resolve_fresh(&url, live.as_deref()))?;
+        hls::keep_grown(&url, live.as_deref(), &list.segments, list.ends_at, false);
+        player.take_fresh(&url, &list);
+        let since = list.ends_at.map_or(0.0, |t| (now_secs() - t).max(0.0));
+        Ok(Fresh { url: list.url.clone(), duration: list.duration, edge: list.duration + since })
     })
     .await?
 }
@@ -163,11 +192,65 @@ async fn space_live(url: String, live: Option<String>) -> Result<Option<bool>, S
     blocking(move || {
         hls::dynamic_for(&url, live.as_deref()).and_then(|d| match hls::check_live(&d) {
             hls::LiveCheck::On(_) => Some(true),
-            hls::LiveCheck::Over => Some(false),
+            hls::LiveCheck::Over => {
+                // Over: the whole of it, once, for when it is opened or cut
+                let _ = hls::resolve_fresh(&url, live.as_deref());
+                Some(false)
+            }
             hls::LiveCheck::Unknown => None,
         })
     })
     .await
+}
+
+fn now_secs() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
+}
+
+/// GO LIVE: the newest of a Space on air, playing.
+#[tauri::command]
+async fn player_go_live(state: State<'_, AppState>) -> Result<(), String> {
+    let player = state.player.clone();
+    blocking(move || player.go_live()).await?
+}
+
+/// The mini player: the window only as tall as the player (`height`), its
+/// width kept; and back to the size it had.
+#[tauri::command]
+fn set_mini(window: tauri::WebviewWindow, state: State<AppState>, on: bool, height: f64) -> Result<(), String> {
+    use tauri::LogicalSize;
+    let e = |e: tauri::Error| e.to_string();
+    let mut saved = state.full_size.lock().unwrap();
+    if on {
+        let scale = window.scale_factor().map_err(e)?;
+        let size = window.inner_size().map_err(e)?.to_logical::<f64>(scale);
+        if saved.is_none() {
+            *saved = Some(size);
+        }
+        window.set_min_size(Some(LogicalSize::new(460.0, height))).map_err(e)?;
+        window.set_max_size(Some(LogicalSize::new(10_000.0, height))).map_err(e)?;
+        window.set_size(LogicalSize::new(size.width, height)).map_err(e)?;
+    } else {
+        let full = saved.take().unwrap_or(LogicalSize::new(560.0, 740.0));
+        window.set_max_size(None::<LogicalSize<f64>>).map_err(e)?;
+        window.set_min_size(Some(LogicalSize::new(460.0, 560.0))).map_err(e)?;
+        // It grows up and down around where the small window is, and stays
+        // whole on its screen: growing only downwards, a small window moved
+        // low would hide most of the full one below the screen's edge
+        let at = window.outer_position().map_err(e)?;
+        let now = window.outer_size().map_err(e)?;
+        let frame = now.height.saturating_sub(window.inner_size().map_err(e)?.height) as f64;
+        let tall = full.height * window.scale_factor().map_err(e)? + frame;
+        if let Some(screen) = window.current_monitor().map_err(e)? {
+            let area = screen.work_area();
+            let top = area.position.y as f64;
+            let bottom = top + area.size.height as f64;
+            let y = (at.y as f64 + now.height as f64 / 2.0 - tall / 2.0).min(bottom - tall).max(top);
+            window.set_position(tauri::PhysicalPosition::new(at.x, y.round() as i32)).map_err(e)?;
+        }
+        window.set_size(full).map_err(e)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -269,7 +352,7 @@ fn tell_about_updates(app: &AppHandle) {
     match update::check_now(&current) {
         update::Found::Newer(found) => app
             .dialog()
-            .message(format!("Space Cutter {} is out. You have {current}.", found.version.trim_start_matches(['v', 'V'])))
+            .message(format!("Spacecut {} is out. You have {current}.", found.version.trim_start_matches(['v', 'V'])))
             .title("A new version is available")
             .buttons(MessageDialogButtons::OkCancelCustom("Download".into(), "Later".into()))
             .show(move |download| {
@@ -279,13 +362,13 @@ fn tell_about_updates(app: &AppHandle) {
             }),
         update::Found::UpToDate => app
             .dialog()
-            .message(format!("Space Cutter {current} is the newest version."))
+            .message(format!("Spacecut {current} is the newest version."))
             .title("You're up to date")
             .kind(MessageDialogKind::Info)
             .show(|_| {}),
         update::Found::NoAnswer => app
             .dialog()
-            .message("Space Cutter couldn't reach GitHub. Check your internet connection and try again.")
+            .message("Spacecut couldn't reach GitHub. Check your internet connection and try again.")
             .title("Couldn't check for updates")
             .kind(MessageDialogKind::Warning)
             .show(|_| {}),
@@ -298,7 +381,7 @@ fn notify_done(app: AppHandle, window: tauri::Window, body: String) {
     if window.is_focused().unwrap_or(false) {
         return;
     }
-    let _ = app.notification().builder().title("Space Cutter").body(body).show();
+    let _ = app.notification().builder().title("Spacecut").body(body).show();
 }
 
 fn main() {
@@ -311,6 +394,7 @@ fn main() {
             app.manage(AppState {
                 player: Arc::new(player::Player::new(ffmpeg.clone())),
                 job: Arc::new(cutter::Control::default()),
+                full_size: Default::default(),
                 ffmpeg,
             });
             #[cfg(target_os = "macos")]
@@ -329,7 +413,10 @@ fn main() {
             player_load,
             space_info,
             space_live,
+            fresh_replay,
             player_play,
+            player_go_live,
+            set_mini,
             player_pause,
             player_seek,
             player_state,
@@ -345,7 +432,7 @@ fn main() {
             open_update,
         ])
         .build(tauri::generate_context!())
-        .expect("error while starting Space Cutter")
+        .expect("error while starting Spacecut")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
                 // Leave no ffmpeg running behind the closed window

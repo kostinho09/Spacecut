@@ -112,6 +112,11 @@ fn get(url: &str) -> Result<Vec<u8>, Refusal> {
     if bytes.is_empty() {
         return Err(refused(format!("{url}: empty"), Kind::Other));
     }
+    #[cfg(test)]
+    {
+        hls::net::add(&hls::net::PIECES, 1);
+        hls::net::add(&hls::net::PIECE_BYTES, bytes.len() as u64);
+    }
     Ok(bytes)
 }
 

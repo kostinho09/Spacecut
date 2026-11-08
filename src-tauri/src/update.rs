@@ -1,4 +1,4 @@
-//! Asks GitHub, at most once a day, whether a newer Space Cutter is out. It is
+//! Asks GitHub, at most once a day, whether a newer Spacecut is out. It is
 //! the same request as opening the Releases page: nothing about the user is
 //! sent. In between checks it answers from what the last one found. A newer
 //! version shows as a small tag at the top of the window, and nothing more.
@@ -38,7 +38,7 @@ fn now() -> u64 {
 fn latest_release() -> Option<String> {
     let body = ureq::get(&format!("https://api.github.com/repos/{REPO}/releases/latest"))
         .set("Accept", "application/vnd.github+json")
-        .set("User-Agent", concat!("SpaceCutter/", env!("CARGO_PKG_VERSION")))
+        .set("User-Agent", concat!("Spacecut/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(10))
         .call()
         .ok()?
@@ -111,7 +111,7 @@ pub fn dismiss(version: &str) {
 /// Opens a release page in the default browser; only this repository's.
 pub fn open(url: &str) -> Result<(), String> {
     if !url.starts_with(&format!("https://github.com/{REPO}/releases/")) {
-        return Err("Not a Space Cutter release".into());
+        return Err("Not a Spacecut release".into());
     }
     let mut cmd = if cfg!(target_os = "macos") {
         std::process::Command::new("open")

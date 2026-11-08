@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use regex::Regex;
 
@@ -18,13 +18,44 @@ pub(crate) fn agent() -> &'static ureq::Agent {
     })
 }
 
+/// What was fetched, counted for tests that compare versions.
+#[cfg(test)]
+pub mod net {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    pub static LIVE: AtomicU64 = AtomicU64::new(0);
+    pub static LISTS: AtomicU64 = AtomicU64::new(0);
+    pub static LIST_PIECES: AtomicU64 = AtomicU64::new(0);
+    pub static PIECES: AtomicU64 = AtomicU64::new(0);
+    pub static PIECE_BYTES: AtomicU64 = AtomicU64::new(0);
+    pub static OTHER: AtomicU64 = AtomicU64::new(0);
+    pub fn add(c: &AtomicU64, n: u64) {
+        c.fetch_add(n, Relaxed);
+    }
+    pub fn report() -> String {
+        format!(
+            "NET live={} lists={} list_pieces={} pieces={} piece_bytes={} other={}",
+            LIVE.load(Relaxed), LISTS.load(Relaxed), LIST_PIECES.load(Relaxed), PIECES.load(Relaxed), PIECE_BYTES.load(Relaxed), OTHER.load(Relaxed)
+        )
+    }
+}
+
 pub fn get_text(url: &str) -> Result<String, String> {
-    agent()
+    let text = agent()
         .get(url)
         .call()
         .map_err(|e| e.to_string())?
         .into_string()
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    #[cfg(test)]
+    if url.contains("dynamic_playlist") {
+        net::add(&net::LIVE, 1);
+    } else if url.contains("master_playlist") {
+        net::add(&net::OTHER, 1);
+    } else {
+        net::add(&net::LISTS, 1);
+        net::add(&net::LIST_PIECES, text.matches("#EXTINF").count() as u64);
+    }
+    Ok(text)
 }
 
 pub fn is_m3u8(url: &str) -> bool {
@@ -57,6 +88,29 @@ pub struct Playlist {
     pub moved: bool,
     /// The recording is over: the list won't grow any more.
     pub ended: bool,
+    /// When the last piece ends, in seconds since 1970, if the list says:
+    /// how far behind live its end is, without asking anything.
+    pub ends_at: Option<f64>,
+}
+
+/// A #EXT-X-PROGRAM-DATE-TIME, in seconds since 1970.
+fn clock(line: &str) -> Option<f64> {
+    let t = chrono::DateTime::parse_from_rfc3339(line.trim()).ok()?;
+    Some(t.timestamp_millis() as f64 / 1000.0)
+}
+
+/// When the last piece of a media playlist ends: the last date it gives,
+/// plus the pieces after it.
+fn ends_at(text: &str) -> Option<f64> {
+    let mut at = None;
+    for line in text.lines().map(str::trim) {
+        if let Some(rest) = line.strip_prefix("#EXT-X-PROGRAM-DATE-TIME:") {
+            at = clock(rest);
+        } else if let (Some(rest), Some(t)) = (line.strip_prefix("#EXTINF:"), at.as_mut()) {
+            *t += rest.split(',').next().and_then(|d| d.trim().parse::<f64>().ok()).unwrap_or(0.0);
+        }
+    }
+    at
 }
 
 /// Segments of a media playlist, each placed on the timeline the cut
@@ -107,7 +161,7 @@ pub fn load_playlist(url: &str) -> Result<Playlist, String> {
             .find_map(|l| l.trim().strip_prefix("#EXT-X-PROGRAM-DATE-TIME:"))
             .map(|s| s.trim().to_string());
         let ended = text.contains("#EXT-X-ENDLIST");
-        return Ok(Playlist { segments, duration, started, url, moved: false, ended });
+        return Ok(Playlist { segments, duration, started, url, moved: false, ended, ends_at: ends_at(&text) });
     }
     Err("The playlist points to too many other playlists".into())
 }
@@ -194,6 +248,8 @@ pub fn live_to_replay(dynamic: &str) -> Result<String, String> {
     let mut first = None;
     for dynamic in on_hosts(dynamic) {
         let master = dynamic.replace("/dynamic_playlist.m3u8?type=live", "/master_playlist.m3u8");
+        #[cfg(test)]
+        net::add(&net::OTHER, 1);
         let name = agent()
             .get(&master)
             .timeout(Duration::from_secs(10))
@@ -235,6 +291,8 @@ fn dynamic_of(url: &str) -> Option<String> {
 fn replay_beside_live(dynamic: &str) -> Option<String> {
     on_hosts(dynamic).into_iter().find_map(|dynamic| {
         let master = dynamic.replace("/dynamic_playlist.m3u8?type=live", "/master_playlist.m3u8");
+        #[cfg(test)]
+        net::add(&net::OTHER, 1);
         let text = agent().get(&master).timeout(Duration::from_secs(10)).call().ok()?.into_string().ok()?;
         let name = text.split("audio-space/").nth(1)?.lines().next()?.trim().to_string();
         Some(dynamic.replace("dynamic_playlist.m3u8", &name).replace("type=live", "type=replay"))
@@ -243,6 +301,8 @@ fn replay_beside_live(dynamic: &str) -> Option<String> {
 
 /// Whether the server gives out a piece.
 fn opens(segment: &Segment) -> bool {
+    #[cfg(test)]
+    net::add(&net::OTHER, 1);
     agent().get(&segment.url).timeout(Duration::from_secs(10)).call().is_ok()
 }
 
@@ -288,15 +348,11 @@ pub fn resolve(url: &str, live: Option<&str>) -> Result<Playlist, String> {
 }
 
 /// Where a Space's audio was found, so the player (on every load) and each
-/// clip of a cut don't look again. A finished recording is kept for good; one
-/// still live for a few seconds, as its list keeps growing.
-struct Found {
-    list: Playlist,
-    at: Instant,
-}
-
-fn found() -> &'static Mutex<HashMap<String, Found>> {
-    static FOUND: OnceLock<Mutex<HashMap<String, Found>>> = OnceLock::new();
+/// clip of a cut don't look again. Kept for good, a Space on air too: its
+/// list is asked for again only when something needs what came out since
+/// (see `resolve_fresh`).
+fn found() -> &'static Mutex<HashMap<String, Playlist>> {
+    static FOUND: OnceLock<Mutex<HashMap<String, Playlist>>> = OnceLock::new();
     FOUND.get_or_init(Default::default)
 }
 
@@ -305,13 +361,93 @@ fn key(url: &str, live: Option<&str>) -> String {
 }
 
 fn remember(url: &str, live: Option<&str>, list: &Playlist) {
-    found().lock().unwrap().insert(key(url, live), Found { list: list.clone(), at: Instant::now() });
+    found().lock().unwrap().insert(key(url, live), list.clone());
 }
 
 fn recall(url: &str, live: Option<&str>) -> Option<Playlist> {
-    let found = found().lock().unwrap();
-    let hit = found.get(&key(url, live))?;
-    (hit.list.ended || hit.at.elapsed() < Duration::from_secs(5)).then(|| hit.list.clone())
+    found().lock().unwrap().get(&key(url, live)).cloned()
+}
+
+/// The replay of a Space known to be on air, asked for at once where X keeps
+/// replays: one request, without `resolve`'s checks (whether it is on air,
+/// whether its pieces open), which are known by then.
+pub fn replay_now(dynamic: &str) -> Result<Playlist, String> {
+    let mut error = None;
+    for candidate in archive_of(dynamic).map(|a| on_hosts(&a)).unwrap_or_default() {
+        match load_playlist(&candidate) {
+            Ok(mut list) if !list.segments.is_empty() => {
+                list.ended = false;
+                return Ok(list);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                error.get_or_insert(e);
+            }
+        }
+    }
+    Err(error.unwrap_or_else(|| "The server gave no replay".into()))
+}
+
+/// The playlist as known; for a Space that was on air when it was asked for
+/// and has ended since (a look at its small live list), as it ended.
+pub fn resolve_known(url: &str, live: Option<&str>) -> Result<Playlist, String> {
+    let list = resolve(url, live)?;
+    if list.ended || !dynamic_for(url, live).is_some_and(|d| matches!(check_live(&d), LiveCheck::Over)) {
+        return Ok(list);
+    }
+    resolve_fresh(url, live)
+}
+
+/// The whole of a Space as it is now: for one on air, all that is out by
+/// this moment (a fresh replay), not only what was known.
+pub fn resolve_whole(url: &str, live: Option<&str>) -> Result<Playlist, String> {
+    let list = resolve(url, live)?;
+    if list.ended {
+        return Ok(list);
+    }
+    resolve_fresh(url, live)
+}
+
+/// What a Space on air grew to in the player: kept for when it is opened
+/// again, so its bar doesn't fall back to what it was first.
+pub fn keep_grown(url: &str, live: Option<&str>, segments: &[Segment], ends_at: Option<f64>, ended: bool) {
+    let mut found = found().lock().unwrap();
+    let Some(list) = found.get_mut(&key(url, live)) else { return };
+    if segments.len() >= list.segments.len() {
+        list.segments = segments.to_vec();
+        list.duration = segments.last().map_or(0.0, |s| s.start + s.dur);
+        list.ends_at = ends_at.or(list.ends_at);
+        list.ended |= ended;
+    }
+}
+
+/// How many times a list was asked for again (tests count them).
+#[cfg(test)]
+pub static FRESH: AtomicU64 = AtomicU64::new(0);
+
+/// Pieces a Space on air took on in the player from its live list, right
+/// after those known: kept too, so a clip marked in them needs no replay.
+pub fn keep_added(url: &str, live: Option<&str>, added: &[Segment], ends_at: Option<f64>) {
+    let mut found = found().lock().unwrap();
+    let Some(list) = found.get_mut(&key(url, live)) else { return };
+    for seg in added {
+        let last = list.segments.last().and_then(|s| piece_number(&s.url));
+        if last.zip(piece_number(&seg.url)).is_some_and(|(a, b)| b == a + 1) {
+            list.segments.push(Segment { start: list.duration, dur: seg.dur, url: seg.url.clone() });
+            list.duration += seg.dur;
+        }
+    }
+    list.ends_at = ends_at.or(list.ends_at);
+}
+
+/// A Space's playlist as it is now, asked for again even if known: for a
+/// Space on air, when its newest part is wanted.
+pub fn resolve_fresh(url: &str, live: Option<&str>) -> Result<Playlist, String> {
+    #[cfg(test)]
+    FRESH.fetch_add(1, Ordering::Relaxed);
+    let list = find(url, live)?;
+    remember(url, live, &list);
+    Ok(list)
 }
 
 fn find(url: &str, live: Option<&str>) -> Result<Playlist, String> {
@@ -338,6 +474,8 @@ pub struct LivePiece {
     pub seq: u64,
     pub dur: f64,
     pub name: String,
+    /// When it starts, in seconds since 1970.
+    pub at: Option<f64>,
 }
 
 pub enum LiveCheck {
@@ -363,6 +501,8 @@ pub fn check_live(dynamic: &str) -> LiveCheck {
     if dynamic.contains(REPLAYS) || dynamic.contains(OLD_LIVE) || live_base(dynamic).is_none() {
         return LiveCheck::Unknown;
     }
+    #[cfg(test)]
+    net::add(&net::LIVE, 1);
     let text = match agent().get(dynamic).timeout(Duration::from_secs(5)).call() {
         Ok(r) => r.into_string().unwrap_or_default(),
         Err(ureq::Error::Status(404 | 410, _)) => return LiveCheck::Over,
@@ -375,13 +515,15 @@ pub fn check_live(dynamic: &str) -> LiveCheck {
         return LiveCheck::Over;
     }
     let mut pieces = Vec::new();
-    let mut dur = None;
+    let (mut dur, mut at) = (None, None);
     for line in text.lines().map(str::trim) {
-        if let Some(rest) = line.strip_prefix("#EXTINF:") {
+        if let Some(rest) = line.strip_prefix("#EXT-X-PROGRAM-DATE-TIME:") {
+            at = clock(rest);
+        } else if let Some(rest) = line.strip_prefix("#EXTINF:") {
             dur = rest.split(',').next().and_then(|d| d.trim().parse().ok());
         } else if !line.is_empty() && !line.starts_with('#') {
             if let (Some(d), Some(seq)) = (dur.take(), piece_number(line)) {
-                pieces.push(LivePiece { seq, dur: d, name: line.split('?').next().unwrap_or(line).to_string() });
+                pieces.push(LivePiece { seq, dur: d, name: line.split('?').next().unwrap_or(line).to_string(), at: at.take() });
             }
         }
     }
@@ -560,6 +702,14 @@ mod tests {
     }
 
     #[test]
+    fn knows_when_the_last_piece_ends() {
+        let text = "#EXTM3U\n#EXT-X-PROGRAM-DATE-TIME:2026-11-03T05:36:21.572Z\n#EXTINF:3.0,\nchunk_1_0_b.aac\n#EXT-X-PROGRAM-DATE-TIME:2026-11-03T05:36:24.500Z\n#EXTINF:2.5,\nchunk_1_1_b.aac\n";
+        let end = ends_at(text).unwrap();
+        assert!((end - (clock("2026-11-03T05:36:24.500Z").unwrap() + 2.5)).abs() < 1e-6);
+        assert_eq!(ends_at("#EXTM3U\n#EXTINF:3.0,\nchunk_1_0_b.aac\n"), None);
+    }
+
+    #[test]
     fn reads_the_number_of_a_piece() {
         assert_eq!(piece_number("https://h/a/chunk_1793688216796384610_2571_b.aac?type=live"), Some(2571));
         assert_eq!(piece_number("chunk_1793680508649668229_0_b.aac"), Some(0));
@@ -610,6 +760,7 @@ mod tests {
             url: String::new(),
             moved: false,
             ended: true,
+            ends_at: None,
         };
         let moved = at_live(list, "https://h/x/non_transcode/atla/live/audio-space/");
         assert_eq!(moved.segments[0].url, "https://h/x/non_transcode/atla/live/audio-space/chunk_1_0_b.aac?type=live");

@@ -303,7 +303,29 @@ function tagMenu(e, s) {
 }
 
 async function copyLink(s, btn) {
-  await invoke('clipboard_write', { text: s.url });
+  let text = s.url;
+  let span = '';
+  // A Space on air: a replay link made now, holding all that is out so far,
+  // and the bar brought up to it, so the two agree
+  if (s.isLive) {
+    try {
+      const info = await invoke('fresh_replay', { url: s.url, live: s.live || null });
+      text = info.url;
+      span = `${fmt(0)} – ${fmt(info.duration)}`;
+      Object.assign(s, { duration: info.duration, ...liveAt(info.edge, true) });
+      if (S.p.url === s.url && S.p.view) {
+        Object.assign(S.p, { duration: info.duration, edge: s.edge, edgeAt: s.edgeAt });
+        renderPlayer();
+        renderRegions();
+      }
+      pollSoon();
+    } catch { /* the link it was opened with */ }
+  }
+  await invoke('clipboard_write', { text });
+  // The tags may have been drawn again meanwhile: this Space's as it is now
+  const tag = ui.tags.querySelector(`.tag[data-id="${s.id}"]`);
+  btn = tag?.querySelector('.tcopy') || btn;
+  if (span) copyNote(tag, 'Link copied', span);
   btn.innerHTML = ICON.check;
   btn.classList.add('done');
   btn.title = 'Copied';
@@ -369,19 +391,26 @@ function renderTags() {
     ui.tags.append(h('div', {
       class: `tag${s.id === S.active ? ' on' : ''}${s.id === S.newTag ? ' new' : ''}`,
       role: 'button',
+      dataset: { id: String(s.id) },
       style: colorVars(s),
       title: s.local ? s.url : s.name,
       onclick: () => activate(s.id),
       ondblclick: () => renameSource(s),
       oncontextmenu: e => tagMenu(e, s),
-    }, h('span', { class: 't' }, s.name), s.id === S.active ? null : h('span', { class: dotClass(s) }), copy));
+    }, h('span', { class: 't' }, s.name), tagMark(s), copy));
   }
   S.newTag = null;
 }
 
-/** A tag's dot, breathing while its Space is heard from another tag. */
-function dotClass(s) {
-  return `dot${S.player.url === s.url && S.player.playing ? ' heard' : ''}`;
+/** Another tag's mark in its colour, a dot or three bars of sound (as chosen
+ *  by the time): still, and alive while that Space is the one heard. The open
+ *  Space has its own by the time. */
+function tagMark(s) {
+  if (s.id === S.active) return null;
+  const heard = S.player.url === s.url && S.player.playing;
+  return h('span', { class: 'sm', title: heard ? 'Playing' : '' },
+    h('span', { class: `dot${heard ? ' heard' : ''}` }),
+    h('span', { class: `wave${heard ? '' : ' still'}` }, h('i'), h('i'), h('i')));
 }
 
 function renderClips() {
@@ -490,10 +519,29 @@ function pendingClip() {
   return c && c.src === S.active && !c.full && parseHMS(c.start) != null && parseHMS(c.end) == null ? c : null;
 }
 
+function showDur() {
+  $('#dur').textContent = `/ ${fmt(S.p.duration)}`;
+}
+
+/** The big time: where the playhead is, or, clicked, what is left until the end (as on YouTube). */
+S.timeLeft = (() => { try { return localStorage.getItem('timeLeft') === '1'; } catch { return false; } })();
+function showPos(pos) {
+  const t = S.timeLeft ? `−${fmt(Math.max(0, S.p.duration - pos))}` : fmt(pos);
+  if (ui.pos.textContent !== t) ui.pos.textContent = t;
+}
+ui.pos.title = 'Click for the time left';
+ui.pos.addEventListener('click', () => {
+  S.timeLeft = !S.timeLeft;
+  try { localStorage.setItem('timeLeft', S.timeLeft ? '1' : '0'); } catch { /* kept for this time only */ }
+  ui.pos.title = S.timeLeft ? 'Time left: click for where it is' : 'Click for the time left';
+  S.shownSec = -1;
+  kick();
+});
+
 function renderPlayer() {
   const p = S.p;
   const s = active();
-  $('#dur').textContent = `/ ${fmt(p.duration)}`;
+  showDur();
   showPlaying();
   const ready = !!s && p.loaded && !p.loading;
   for (const id of ['speed', 'play', 'back', 'fwd', 'mark']) $(`#${id}`).disabled = !ready;
@@ -533,17 +581,37 @@ function renderMsg() {
   else if (p.loading) t = 'Loading…';
   else if (p.playing && p.buffering) t = 'Buffering…';
   else if (pendingClip()) t = 'Now mark the end';
-  else if (p.live && !p.view && behindLive() >= AT_LIVE) t = `${fmtLen(behindLive())} behind live`;
-  else if (p.live && !p.view && p.playing) t = 'Listening live';
+  else if (p.live && !p.view && p.playing && behindLive() < AT_LIVE) t = 'Listening live';
+  else if (p.live && !p.view && liveGap()) t = `${fmtLen(liveGap())} behind live`;
   else if (p.loaded) t = 'or drag across the bar';
   if (ui.msg.textContent !== t) ui.msg.textContent = t;
   ui.msg.className = `msg ${k}`;
 }
 
 /** How far behind live a Space on air counts as live still, and how far back "live" plays. */
-const AT_LIVE = 20;
-const LIVE_BACK = 10;
-const behindLive = () => Math.round(Math.max(0, S.p.duration - currentPos()));
+const AT_LIVE = 30;
+/** How far behind live the playhead is: from when the newest piece known
+ *  came out, as the clock has gone on since, with nothing asked for. */
+const behindLive = () => {
+  const p = S.p;
+  const edge = p.edge ? p.edge + (performance.now() - p.edgeAt) / 1000 : p.duration;
+  return Math.round(Math.max(0, edge - currentPos()));
+};
+/** How far live has got past the end of the bar (it stops while you listen
+ *  well behind), in steps: 5 s, 15 s, 30 s, then every 15 s, every 30 s past
+ *  5 minutes and every minute past 10. 0 while the bar keeps up with live. */
+function liveGap() {
+  const p = S.p;
+  if (!p.edge) return 0;
+  const gap = p.edge + (performance.now() - p.edgeAt) / 1000 - p.duration;
+  if (gap < 5) return 0;
+  if (gap < 15) return 5;
+  const step = gap < 300 ? 15 : gap < 600 ? 30 : 60;
+  return Math.floor(gap / step) * step;
+}
+
+/** Where live was, for a Space or the player: kept with the moment it was so. */
+const liveAt = (edge, live) => (live ? { edge, edgeAt: performance.now() } : { edge: 0, edgeAt: 0 });
 
 /** Shows a Space in the player. `force` loads it even while another one plays. */
 async function loadPlayer(s, force = false) {
@@ -556,25 +624,27 @@ async function loadPlayer(s, force = false) {
     if (token !== S.loadToken) return;
     if (st && st.loaded && st.url === s.url) {
       Object.assign(S.p, { loading: false, loaded: true, view: false, url: s.url, duration: st.duration, pos: st.pos, at: performance.now(),
-        playing: st.playing, buffering: st.buffering, ended: st.ended, error: st.error || '', live: st.live });
+        playing: st.playing, buffering: st.buffering, ended: st.ended, error: st.error || '', live: st.live, ...liveAt(st.edge, st.live) });
       shown();
       return;
     }
   }
   // What plays keeps playing while another Space is looked at; Play there takes over.
-  // A Space seen before shows at once where it was left; its length is asked
-  // for (a whole replay, for one on air) only the first time and then once a minute.
+  // A Space seen before shows at once as it was; one on air as a replay of
+  // what was out by then, its length asked for only the first time.
   if (!force && S.player.playing) {
     const known = s.duration > 0;
     Object.assign(S.p, { loading: !known, loaded: known, view: true, playing: false, buffering: false, error: '', url: s.url,
-      duration: s.duration || 0, pos: Math.min(s.lastPos || 0, s.duration || 0), at: performance.now(), ended: false, live: !!s.isLive });
+      duration: s.duration || 0, pos: Math.min(s.lastPos || 0, s.duration || 0), at: performance.now(), ended: false, live: !!s.isLive,
+      edge: s.edge || 0, edgeAt: s.edgeAt || 0 });
     shown();
-    if (known && (!s.isLive || performance.now() - (s.checkedAt || 0) < 60000)) return;
+    if (known) return;
     try {
       const info = await invoke('space_info', { url: s.url, live: s.live || null });
       if (token !== S.loadToken) return;
-      Object.assign(s, { duration: info.duration, isLive: info.live, checkedAt: performance.now() });
-      Object.assign(S.p, { loading: false, loaded: true, duration: info.duration, pos: Math.min(known ? S.p.pos : s.lastPos || 0, info.duration), live: info.live });
+      Object.assign(s, { duration: info.duration, isLive: info.live, ...liveAt(info.edge, info.live) });
+      Object.assign(S.p, { loading: false, loaded: true, duration: info.duration, pos: Math.min(s.lastPos || 0, info.duration), live: info.live,
+        edge: s.edge, edgeAt: s.edgeAt });
     } catch (e) {
       if (token !== S.loadToken) return;
       if (!known) Object.assign(S.p, { loading: false, error: String(e) });
@@ -589,12 +659,11 @@ async function loadPlayer(s, force = false) {
     const info = await invoke('player_load', { url: s.url, live: s.live || null });
     if (token !== S.loadToken) return;
     S.player = { url: s.url, playing: false, live: info.live };
-    Object.assign(S.p, { loading: false, loaded: true, duration: info.duration, pos: 0, at: performance.now(), ended: false, live: info.live });
-    Object.assign(s, { duration: info.duration, isLive: info.live, checkedAt: performance.now() });
-    // Back where it was left; a Space on air opens on live the first time,
-    // and Play then starts from live as it is by then
+    Object.assign(s, { duration: info.duration, isLive: info.live, ...liveAt(info.edge, info.live) });
+    Object.assign(S.p, { loading: false, loaded: true, duration: info.duration, pos: 0, at: performance.now(), ended: false, live: info.live,
+      edge: s.edge, edgeAt: s.edgeAt });
+    // Back where it was left; a Space on air opens as a replay, GO LIVE syncs it
     if (s.lastPos > 0) await seek(s.lastPos);
-    else if (info.live) { await seek(Math.max(0, info.duration - LIVE_BACK)); S.p.onLive = true; }
   } catch (e) {
     if (token !== S.loadToken) return;
     Object.assign(S.p, { loading: false, error: String(e) });
@@ -622,7 +691,7 @@ async function playHere() {
   await togglePlay();
 }
 
-/** Back to the newest moment of a Space on air, playing. */
+/** GO LIVE: what came out since (a fresh replay), and on from live, playing. */
 async function goLive() {
   const s = active();
   if (!s || !S.p.loaded || !S.p.live) return;
@@ -630,10 +699,31 @@ async function goLive() {
     S.p.url = '';
     await loadPlayer(s, true);
     if (!S.p.loaded || S.p.view) return;
-  } else {
-    await seek(Math.max(0, S.p.duration - LIVE_BACK));
   }
-  if (!S.p.playing) await togglePlay();
+  S.actionAt = performance.now();
+  Object.assign(S.p, { buffering: true, playing: true, error: '' });
+  showPlaying();
+  try { await invoke('player_go_live'); }
+  catch (e) { S.p.error = String(e); renderMsg(); }
+  S.actionAt = 0;
+  pollSoon();
+}
+
+/** A note of two lines above a tag for a few seconds, pointing at it. */
+function copyNote(tag, title, detail) {
+  document.querySelectorAll('.copy-note').forEach(n => n.remove());
+  if (!tag) return;
+  const note = h('div', { class: 'copy-note' }, h('b', {}, title), h('span', {}, detail));
+  document.body.append(note);
+  const t = tag.getBoundingClientRect();
+  const w = note.offsetWidth;
+  const centre = t.left + t.width / 2;
+  // Kept inside the window; its point stays on the tag
+  const left = Math.max(8, Math.min(centre - w / 2, window.innerWidth - w - 8));
+  note.style.left = `${left}px`;
+  note.style.top = `${t.top - note.offsetHeight - 9}px`;
+  note.style.setProperty('--point', `${centre - left}px`);
+  setTimeout(() => note.remove(), 3500);
 }
 
 /** LIVE beside the time, for a Space on air. */
@@ -664,7 +754,6 @@ async function togglePlay() {
       p.playing = false;
     } else {
       if (!p.live && (p.ended || (p.duration && p.pos >= p.duration - 0.5))) p.pos = 0;
-      if (p.live && p.onLive) await seek(Math.max(0, p.duration - LIVE_BACK));
       await invoke('player_play');
       p.playing = true;
       p.buffering = true;
@@ -685,7 +774,6 @@ async function seek(t) {
   const p = S.p;
   if (!p.loaded) return;
   const to = Math.max(0, p.duration ? Math.min(t, p.duration) : t);
-  p.onLive = false;
   // Only looked at: the playhead moves here, the player plays on
   if (p.view) {
     Object.assign(p, { pos: to, at: performance.now() });
@@ -719,9 +807,13 @@ async function poll() {
   const changed = p.playing !== st.playing || p.buffering !== st.buffering || p.error !== (st.error || '') || p.live !== st.live;
   // A Space on air grows as it plays
   const grew = Math.abs(p.duration - st.duration) > 0.01;
-  Object.assign(p, { pos: st.pos, at: performance.now(), playing: st.playing, buffering: st.buffering, ended: st.ended, error: st.error || '', live: st.live, duration: st.duration });
+  Object.assign(p, { pos: st.pos, at: performance.now(), playing: st.playing, buffering: st.buffering, ended: st.ended, error: st.error || '', live: st.live, duration: st.duration,
+    ...liveAt(st.edge, st.live) });
+  const shownSrc = active();
+  if (shownSrc && shownSrc.url === p.url) Object.assign(shownSrc, { duration: p.duration, isLive: p.live, edge: p.edge, edgeAt: p.edgeAt });
   if (grew) {
-    $('#dur').textContent = `/ ${fmt(p.duration)}`;
+    showDur();
+    S.shownSec = -1;
     S.shownPx = -1;
     S.shownBand = null;
     renderRegions();
@@ -732,10 +824,13 @@ async function poll() {
   kick();
 }
 
-/** The play button, and the Space's dot by the time: breathing while it plays. */
+/** The play button, and the Space's mark by the time: moving while it plays. */
 function showPlaying() {
   const p = S.p;
   ui.play.innerHTML = p.playing ? ICON.pause : ICON.play;
+  // A clip being marked while paused: the ring stays red without blinking,
+  // so it is clear the playhead can be moved, back or on, to set its end
+  $('#mark').classList.toggle('still', !(p.playing && !p.buffering));
   const dot = $('#liveDot');
   dot.classList.toggle('hidden', p.live || !p.loaded || !active());
   dot.classList.toggle('on', p.playing && !p.buffering);
@@ -767,7 +862,7 @@ function frame() {
   const sec = Math.floor(pos);
   if (sec !== S.shownSec) {
     S.shownSec = sec;
-    ui.pos.textContent = fmt(sec);
+    showPos(sec);
     if (p.live) { renderLive(); renderMsg(); }
   }
   // Touch the page only when the playhead moves a whole pixel
@@ -787,14 +882,19 @@ function frame() {
     const len = $('#mark .rec-len');
     if (len) len.textContent = rec >= 0 ? fmtLen(rec) : '';
   }
-  const band = a != null && p.duration && pos > a ? `${Math.round((a / p.duration) * w)}:${px}` : '';
+  // ... either way: the playhead taken back before it stretches the same
+  let band = '';
+  if (a != null && p.duration && Math.abs(pos - a) >= 0.5) {
+    const ax = Math.round((a / p.duration) * w);
+    band = `${Math.min(ax, px)}:${Math.max(ax, px)}`;
+  }
   if (band !== S.shownBand) {
     S.shownBand = band;
     ui.pending.classList.toggle('hidden', !band);
     if (band) {
-      const from = Math.round((a / p.duration) * w);
+      const [from, to] = band.split(':').map(Number);
       ui.pending.style.left = `${from}px`;
-      ui.pending.style.width = `${px - from}px`;
+      ui.pending.style.width = `${to - from}px`;
     }
   }
   if (S.drag) { kick(); return; }
@@ -1046,14 +1146,17 @@ ui.clips.addEventListener('mousedown', e => {
   t.select();
 });
 
-ui.clips.addEventListener('click', e => {
+ui.clips.addEventListener('click', async e => {
   const btn = e.target.closest('[data-act]');
   const c = clipById(Number(e.target.closest('.clip')?.dataset.id));
   if (!btn || !c) return;
   if (btn.dataset.act === 'seek') {
     select(c.id);
     const a = parseHMS(c.start);
-    if (!c.full && a != null) seek(a);
+    if (!c.full && a == null) return;
+    if (!c.full) await seek(a);
+    // It plays from there, even if paused or another Space was playing
+    if (S.p.loaded && (!S.p.playing || S.p.view)) await togglePlay();
   } else if (btn.dataset.act === 'menu') {
     const r = btn.getBoundingClientRect();
     clipMenu(r.right - 200, r.bottom + 4, c);
@@ -1590,7 +1693,7 @@ function ask(title, label, value = '') {
 }
 
 const HELP = {
-  link: `<b>The Dynamic Link</b>A Space provides its audio through a <strong>Dynamic link</strong> while it's live, but this can be converted into a <strong>Replay link</strong> at any time, for up to 30 days after the Space has ended. SpaceCutter does this <strong>automatically</strong>: it converts the <strong>Dynamic link</strong> into a <strong>Replay link</strong> and then cuts the audio.
+  link: `<b>The Dynamic Link</b>A Space provides its audio through a <strong>Dynamic link</strong> while it's live, but this can be converted into a <strong>Replay link</strong> at any time, for up to 30 days after the Space has ended. Spacecut does this <strong>automatically</strong>: it converts the <strong>Dynamic link</strong> into a <strong>Replay link</strong> and then cuts the audio.
 
 <b>Get It While the Space Is Live</b>1. Open the Space in your browser.
 2. Press F12 to open the Developer Tools.
@@ -1598,14 +1701,14 @@ const HELP = {
 4. Type <code>dynamic</code> in the filter box.
 5. Find the request containing <code>dynamic_playlist.m3u8?type=live</code>.
 6. Right-click it → Copy → Copy URL.
-7. Paste it into the field at the top of SpaceCutter. It will <strong>automatically</strong> be converted into a <strong>Replay link</strong>.
+7. Paste it into the field at the top of Spacecut. It will <strong>automatically</strong> be converted into a <strong>Replay link</strong>.
 
 <b>Good to Know</b><strong>Dynamic</strong> and <strong>Replay links</strong> stop working 30 days after the Space has ended. Cut whatever you want to keep before then.
 Save the <strong>Dynamic link</strong> in a note while the Space is live, so you can still retrieve the <strong>Replay link</strong> later.
 Already have a <strong>Replay link</strong> (<code>…playlist_….m3u8?type=replay</code>)? Paste it directly. There's nothing to convert.`,
   app: `<b>Add a Space</b>Paste a <strong>Dynamic link</strong> or <strong>Replay link</strong> into the field at the top. Each Space gets its own coloured tag. Click the <strong>Copy</strong> icon inside a tag to copy its Replay link, whether you want to listen to the Space in your browser or share it with others. Right-click a tag to rename it, add the entire Space as a single clip, or remove it.
 
-<b>Why Add a File?</b>Many people already have screen recordings of Spaces saved as video files. SpaceCutter makes it easy to convert them into <code>.m4a</code> audio files. <strong>Merge</strong> lets you combine clips from the same Space, different Spaces, or even older clips you've previously saved, with or without SpaceCutter, into one continuous audio file.
+<b>Why Add a File?</b>Many people already have screen recordings of Spaces saved as video files. Spacecut makes it easy to convert them into <code>.m4a</code> audio files. <strong>Merge</strong> lets you combine clips from the same Space, different Spaces, or even older clips you've previously saved, with or without Spacecut, into one continuous audio file.
 You can also add, save, and preview your favourite sound effects to use between clips, making your final audio more playful and engaging.
 
 <b>Mark What to Cut</b>Press <strong>Mark Start</strong> and <strong>Mark End</strong> while listening, or simply drag across the bar to select the exact section you want to cut.
@@ -1676,27 +1779,48 @@ document.addEventListener('keydown', e => {
   else if (key === 'm') { e.preventDefault(); toggleMark(); }
 }, true);
 
+/* ── Mini player ────────────────────────────────────── */
+
+/** The window as a small player (tags, the bar and Mark), or back as it was. */
+async function toggleMini() {
+  const on = !document.body.classList.contains('mini');
+  document.body.classList.toggle('mini', on);
+  // As tall as what is left to show: down to the bottom of the player
+  const main = $('main');
+  main.scrollTop = 0;
+  const height = on ? Math.ceil($('section.player').getBoundingClientRect().bottom + parseFloat(getComputedStyle(main).paddingBottom)) : 0;
+  try { await invoke('set_mini', { on, height }); } catch { /* the window stays as it is */ }
+  S.shownPx = -1;
+  kick();
+}
+// The logo's dots switch it on and off; the button on the right only brings it back
+$('.dots.logo').addEventListener('click', toggleMini);
+$('#fullBtn').innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6M10 20H4v-6M20 4l-6.5 6.5M4 20l6.5-6.5"/></svg>';
+$('#fullBtn').addEventListener('click', toggleMini);
+
+/* ── The Space's mark ───────────────────────────────── */
+
+/** A dot at first; a click on the one by the time turns it into three bars of
+ *  sound, for every Space, and back. Kept for the next time. */
+function showMark(wave) { document.documentElement.classList.toggle('waves', wave); }
+showMark((() => { try { return localStorage.getItem('mark') === 'wave'; } catch { return false; } })());
+$('#liveDot').addEventListener('click', () => {
+  const wave = !document.documentElement.classList.contains('waves');
+  showMark(wave);
+  try { localStorage.setItem('mark', wave ? 'wave' : 'dot'); } catch { /* kept for this time only */ }
+});
+
 /* ── Spaces on air ──────────────────────────────────── */
 
-/** Once a minute the bar of a Space on air shown while another one plays
- *  catches up (a fresh replay, so not more often), and the other Spaces on
- *  air are asked, by their small live lists, whether they still are. */
+/** Once a minute the Spaces on air not in the player are asked, by their
+ *  small live lists, whether they still are (the player asks for its own). */
 async function checkLive() {
-  const s = active();
-  if (s && S.p.view && S.p.live && S.p.loaded) {
-    const info = await invoke('space_info', { url: s.url, live: s.live || null }).catch(() => null);
-    if (info && S.p.url === s.url && S.p.view) {
-      Object.assign(S.p, { duration: info.duration, live: info.live });
-      Object.assign(s, { duration: info.duration, isLive: info.live, checkedAt: performance.now() });
-      renderTags();
-      renderPlayer();
-      renderRegions();
-    }
-  }
-  const others = S.sources.filter(x => x.isLive && x.url !== S.player.url && !(S.p.view && x.id === S.active));
+  const others = S.sources.filter(x => x.isLive && x.url !== S.player.url);
   for (const x of others) {
     const on = await invoke('space_live', { url: x.url, live: x.live || null }).catch(() => null);
-    if (on === false) { x.isLive = false; renderTags(); }
+    if (on !== false) continue;
+    x.isLive = false;
+    if (S.p.url === x.url) { S.p.live = false; renderPlayer(); }
   }
 }
 setInterval(checkLive, 60000);
@@ -1729,7 +1853,7 @@ async function checkUpdate() {
   const [major = 0, minor = 0, patch = 0] = name.split('.').map(Number);
   box.style.setProperty('--uc', COLORS[(major * 3 + minor + patch) % COLORS.length][0]);
   $('.upd-open', box).textContent = `Update ${name}`;
-  $('.upd-open', box).title = `Space Cutter ${name} is out: open its download page`;
+  $('.upd-open', box).title = `Spacecut ${name} is out: open its download page`;
   $('.upd-open', box).onclick = () => invoke('open_update', { url: u.url }).catch(() => {});
   $('.upd-close', box).innerHTML = ICON.close;
   $('.upd-close', box).onclick = () => { box.classList.add('hidden'); invoke('dismiss_update', { version: u.version }); };

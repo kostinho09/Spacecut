@@ -7,7 +7,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -185,7 +185,8 @@ fn length_of(ffmpeg: &Path, row: &Row) -> f64 {
     }
     let url = row.url.trim();
     if hls::is_m3u8(url) {
-        hls::resolve(url, live_of(row)).map(|p| p.duration).unwrap_or(0.0)
+        // A whole Space on air: all that is out when Cut is pressed
+        hls::resolve_whole(url, live_of(row)).map(|p| p.duration).unwrap_or(0.0)
     } else {
         ffmpeg::probe_duration(ffmpeg, url).unwrap_or(0.0)
     }
@@ -211,7 +212,7 @@ fn explain(stderr: &str, out: &Path) -> &'static str {
     if has(&["no space left on device"]) {
         "The disk is full"
     } else if has(&["permission denied", "operation not permitted", "read-only file system"]) || !out.is_dir() {
-        "Space Cutter can't save in the output folder"
+        "Spacecut can't save in the output folder"
     } else if has(&["403 forbidden", "404 not found", "410 gone", "http error 403", "http error 404", "server returned 4"]) {
         "The link has expired or no longer works"
     } else if has(&[
@@ -222,7 +223,7 @@ fn explain(stderr: &str, out: &Path) -> &'static str {
     } else if has(&["no such file or directory"]) {
         "The file isn't there any more"
     } else if has(&["invalid data found", "does not contain any stream", "matches no streams", "output file is empty", "no audio"]) {
-        "There's no audio in this that Space Cutter can read"
+        "There's no audio in this that Spacecut can read"
     } else if has(&["server returned 5"]) {
         "The server had a problem; try again later"
     } else {
@@ -417,16 +418,22 @@ impl Worker<'_> {
         }
 
         // A Space (or a local .m4a/.ts/.aac): copy through an MPEG-TS file
-        let mut space = (!local && hls::is_m3u8(url)).then(|| hls::resolve(url, live_of(row)).ok()).flatten();
-        // A clip of a Space on air may end a moment past what its list has out yet
+        // The whole of a Space on air: all that is out when Cut is pressed
+        let list_of = |url, live| if span.is_none() { hls::resolve_whole(url, live) } else { hls::resolve(url, live) };
+        let mut space = (!local && hls::is_m3u8(url)).then(|| list_of(url, live_of(row)).ok()).flatten();
+        // The list already known covers a clip within it; one of a Space on air
+        // that ends past it needs the list as it is now, and may need to wait
+        // a moment for its last seconds
         if let Some((_, e0)) = span {
-            for _ in 0..8 {
+            for tries in 0..6 {
                 let short = space.as_ref().is_some_and(|l| !l.ended && l.duration < e0 as f64);
                 if !short || self.cancelled() {
                     break;
                 }
-                thread::sleep(Duration::from_secs(2));
-                if let Ok(list) = hls::resolve(url, live_of(row)) {
+                if tries > 0 {
+                    thread::sleep(Duration::from_secs(2));
+                }
+                if let Ok(list) = hls::resolve_fresh(url, live_of(row)) {
                     space = Some(list);
                 }
             }
@@ -584,95 +591,69 @@ impl Worker<'_> {
         None
     }
 
-    /// Joins the clips, with sound effects or silence between them. Everything
-    /// is re-encoded to match the first clip, so the effects adapt to the
-    /// main audio rather than the other way around.
+    /// Joins the clips, with sound effects or silence between them, in one
+    /// go: every part is decoded and they are put end to end sample by
+    /// sample (ffmpeg's concat filter), then encoded once to match the first
+    /// clip, so the effects adapt to the main audio rather than the other way
+    /// around. (Parts joined as separate MPEG-TS files lost or overlapped
+    /// sound at every join, since such files under-report their length, and
+    /// one too short to read, a 0.5 s silence say, ended the join there.)
     fn merge(&self, clips: &[(PathBuf, f64)], job: &Job) {
-        static SILENCE: AtomicU64 = AtomicU64::new(0);
-        let first = path_str(&clips[0].0);
         let (rate, channels, bitrate) = ffmpeg::probe_audio(&self.ffmpeg, &clips[0].0);
-        // Progress: the first half while the parts are converted, the second while they are joined
-        let total = clips.iter().map(|c| c.1).sum::<f64>().max(1.0);
-        let converted = Cell::new(0.0);
-        let advance = |len: f64| {
-            let lo = converted.get() / (2.0 * total);
-            converted.set(converted.get() + len);
-            self.step(lo, (converted.get() / (2.0 * total)).min(0.5), len);
-        };
-        let encode = args!["-c:a", "aac", "-ar", rate.to_string(), "-ac", channels.to_string(), "-b:a", bitrate];
-        let usable = |p: &Path, ok: bool| (ok && fs::metadata(p).is_ok_and(|m| m.len() > 512)).then(|| p.to_path_buf());
-
-        let to_ts = |input: &str, len: f64| -> Option<PathBuf> {
-            advance(len);
-            let ts = PathBuf::from(format!("{input}_conv.ts"));
-            let mut a = args!["-i", input, "-vn"];
-            a.extend(encode.iter().cloned());
-            a.extend(args!["-f", "mpegts", "-y", path_str(&ts)]);
-            usable(&ts, self.ff(a, None).ok)
-        };
-        // Silence is the first clip muted, which avoids lavfi filters a
-        // trimmed-down ffmpeg may lack.
-        let silence = |secs: f64| -> Option<PathBuf> {
-            let n = SILENCE.fetch_add(1, Ordering::Relaxed);
-            let ms = chrono::Local::now().timestamp_millis();
-            let path = self.out.join(format!("_silence_{ms}_{n}.ts"));
-            let mut a = args!["-i", &first, "-t", secs.to_string(), "-vn", "-af", "volume=0"];
-            a.extend(encode.iter().cloned());
-            a.extend(args!["-f", "mpegts", "-y", path_str(&path)]);
-            usable(&path, self.ff(a, None).ok)
-        };
+        let layout = if channels == 1 { "mono" } else { "stereo" };
         // A gap set on one separator also applies wherever none was set.
         let default_gap = job.jingles.values().map(|j| j.gap).fold(0.0, f64::max);
-        let insert = |key: &str, fallback: f64| -> Option<PathBuf> {
+        // What goes in a separator: a sound effect, or seconds of silence
+        let insert = |key: &str, fallback: f64| -> Option<(Option<String>, f64)> {
             let jingle = job.jingles.get(key);
             let effect = jingle.map(|j| j.path.as_str()).unwrap_or("");
             let gap = jingle.map(|j| j.gap).unwrap_or(fallback);
             if !effect.is_empty() && Path::new(effect).exists() {
-                to_ts(effect, ffmpeg::probe_duration(&self.ffmpeg, effect).unwrap_or(1.0))
+                Some((Some(effect.to_string()), ffmpeg::probe_duration(&self.ffmpeg, effect).unwrap_or(1.0)))
             } else if gap > 0.0 {
-                silence(gap)
+                Some((None, gap))
             } else {
                 None
             }
         };
-
         let mut parts = Vec::new();
         parts.extend(insert("j_before", 0.0));
         for (i, (clip, len)) in clips.iter().enumerate() {
-            parts.extend(to_ts(&path_str(clip), *len));
+            parts.push((Some(path_str(clip)), *len));
             if i + 1 < clips.len() {
                 parts.extend(insert(&format!("j_{i}"), default_gap));
             }
         }
         parts.extend(insert("j_after", 0.0));
-        if parts.is_empty() || self.cancelled() {
+        if self.cancelled() {
             return;
         }
 
-        let list = self.out.join("_merge_list.txt");
-        let body: String = parts
-            .iter()
-            .map(|p| format!("file '{}'\n", path_str(p).replace('\'', "'\\''")))
-            .collect();
-        if fs::write(&list, body).is_ok() {
-            let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-            let name = clean_name(&job.merge_name);
-            let name = if name.is_empty() { format!("merged_{stamp}") } else { name };
-            let merged = unique(&self.out, &name, "m4a");
-            // Re-encoding the join guarantees a clean end, even after a trailing effect
-            let mut a = args!["-f", "concat", "-safe", "0", "-i", path_str(&list)];
-            a.extend(encode.iter().cloned());
-            a.extend(args!["-y", path_str(&merged)]);
-            self.step(0.5, 1.0, total);
-            self.ff(a, None);
-        }
-        for p in &parts {
-            let name = path_str(p);
-            if name.contains("_conv.ts") || name.contains("_silence_") {
-                let _ = fs::remove_file(p);
+        let mut a = Vec::new();
+        let mut graph = String::new();
+        for (n, (file, secs)) in parts.iter().enumerate() {
+            match file {
+                Some(path) => a.extend(args!["-i", path]),
+                None => a.extend(args!["-f", "lavfi", "-t", format!("{secs:.3}"), "-i", format!("anullsrc=r={rate}:cl={layout}")]),
             }
+            graph.push_str(&format!("[{n}:a:0]aresample={rate},aformat=sample_fmts=fltp:sample_rates={rate}:channel_layouts={layout}[p{n}];"));
         }
-        let _ = fs::remove_file(&list);
+        graph.extend((0..parts.len()).map(|n| format!("[p{n}]")));
+        graph.push_str(&format!("concat=n={}:v=0:a=1[out]", parts.len()));
+
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        let name = clean_name(&job.merge_name);
+        let name = if name.is_empty() { format!("merged_{stamp}") } else { name };
+        let merged = unique(&self.out, &name, "m4a");
+        a.extend(args!["-filter_complex", graph, "-map", "[out]", "-c:a", "aac", "-ar", rate.to_string(), "-ac", channels.to_string(), "-b:a", bitrate]);
+        a.extend(args!["-y", path_str(&merged)]);
+        let total = parts.iter().map(|p| p.1).sum::<f64>().max(1.0);
+        self.step(0.0, 1.0, total);
+        let out = self.ff(a, None);
+        if !out.ok && !self.cancelled() {
+            let _ = fs::remove_file(&merged);
+            (self.emit)("job-note", json!({ "text": format!("Could not merge the clips: {}", explain(&out.stderr, &self.out)) }));
+        }
     }
 }
 
@@ -832,6 +813,43 @@ mod tests {
         }
         let _ = fs::remove_dir_all(&dir);
         assert!((across - 70.0).abs() < 0.6);
+    }
+
+    /// Merges short tone clips with a 0.5 s silence and effects at the start,
+    /// between and at the end: every part is there, to the sample (a short
+    /// part once ended the join, and joins lost or added sound).
+    #[test]
+    fn merges_every_part_whole() {
+        let ff = ffmpeg::locate(None).unwrap();
+        let dir = std::env::temp_dir().join(format!("spacecutter_parts_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let make = |name: &str, src: &str| {
+            let path = dir.join(name);
+            let ok = Command::new(&ff).args(["-v", "error", "-f", "lavfi", "-i", src, "-ac", "2", "-y"]).arg(&path).status().unwrap().success();
+            assert!(ok, "made {name}");
+            path_str(&path)
+        };
+        let a = make("a.m4a", "sine=frequency=1000:sample_rate=48000:duration=2");
+        let b = make("b.m4a", "sine=frequency=2000:sample_rate=48000:duration=1.5");
+        let fx = make("fx.wav", "anoisesrc=sample_rate=48000:duration=0.4:amplitude=0.3");
+        let clip = |id, url: &str| {
+            let mut r = row(id, url, "", "", &format!("c{id}"));
+            r.full = true;
+            r
+        };
+        let mut jingles = HashMap::new();
+        jingles.insert("j_before".to_string(), Jingle { path: fx.clone(), gap: 0.0 });
+        jingles.insert("j_0".to_string(), Jingle { path: String::new(), gap: 0.5 });
+        jingles.insert("j_after".to_string(), Jingle { path: fx.clone(), gap: 0.0 });
+        let out = dir.join("out");
+        let job = Job { rows: vec![clip(1, &a), clip(2, &b)], output_folder: path_str(&out), merge: true, merge_name: "merged".into(), keep_clips: true, jingles };
+        run(&job);
+        let parts = length(&out.join("c1.m4a")) + 0.5 + length(&out.join("c2.m4a")) + 2.0 * length(Path::new(&fx));
+        let merged = length(&out.join("merged.m4a"));
+        println!("parts {parts:.3} s, merged {merged:.3} s");
+        assert!((merged - parts).abs() < 0.05, "every part is in the merged file: {merged:.3} s of {parts:.3} s");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// What a user is told when a clip can't be cut. Needs the network.
@@ -1031,6 +1049,7 @@ mod tests {
             url: String::new(),
             moved: false,
             ended,
+            ends_at: None,
         };
         assert_eq!(past_the_end(&list(true), 8), None, "it starts in the last piece");
         assert_eq!(past_the_end(&list(true), 9).as_deref(), Some("starts after the Space ends (00:00:09)"));

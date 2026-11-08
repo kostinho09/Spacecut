@@ -1,5 +1,7 @@
-//! Same files the Python app used, so the output folder and the sound
-//! effects carry over.
+//! The settings and the sound effects, in Spacecut's own files. The first
+//! time, they start as a copy of the files the older SpaceCutter (1.x)
+//! kept, so the output folder and the effects carry over; those files are
+//! left as they are for 1.x.
 
 use std::fs;
 use std::path::PathBuf;
@@ -9,12 +11,25 @@ use serde_json::{Map, Value};
 
 use crate::util::home_dir;
 
+/// One of Spacecut's files in the home folder, started from SpaceCutter's
+/// if there is one and Spacecut's isn't there yet.
+fn own_file(name: &str) -> PathBuf {
+    let path = home_dir().join(format!(".spacecut_{name}.json"));
+    if !path.exists() {
+        let old = home_dir().join(format!(".spacecutter_{name}.json"));
+        if old.exists() {
+            let _ = fs::copy(&old, &path);
+        }
+    }
+    path
+}
+
 fn prefs_path() -> PathBuf {
-    home_dir().join(".spacecutter_prefs.json")
+    own_file("prefs")
 }
 
 fn effects_path() -> PathBuf {
-    home_dir().join(".spacecutter_effects.json")
+    own_file("effects")
 }
 
 pub fn load() -> Map<String, Value> {

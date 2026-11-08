@@ -1,4 +1,4 @@
-/* Space Cutter — soft and rounded, light or dark. Colour belongs to the
+/* Spacecut — soft and rounded, light or dark. Colour belongs to the
    Spaces (one per tag); everything else stays grey. */
 
 :root {
@@ -131,6 +131,19 @@ svg { display: block; }
 .icon svg { width: 16px; height: 16px; }
 .icon.done { color: var(--green); }
 
+/* ── Mini player: only the tags, the player and Mark ──── */
+body.mini .source, body.mini #clips, body.mini #mergeBox, body.mini .bottom,
+body.mini #update, body.mini #theme, body.mini #help { display: none !important; }
+body.mini main { overflow: hidden; padding-top: 0; padding-bottom: 12px; }
+body.mini .top { height: 40px; }
+body.mini .tagline { margin-top: 0; }
+body.mini #logoScissors { display: none; }
+/* Only in the mini player, on the right: back to the full window */
+#fullBtn { display: none; }
+body.mini #fullBtn { display: inline-grid; }
+/* The logo's dots switch the mini player on and off: a hand-sized spot */
+.dots.logo { padding: 8px 4px; margin: -8px -4px; cursor: default; }
+
 /* ── Top ────────────────────────────────────────────── */
 .top {
   flex: none; height: 52px; padding: 0 12px 0 84px;
@@ -198,9 +211,25 @@ main { flex: 1; overflow-y: auto; padding: 4px 18px 10px; }
   max-width: 220px;
 }
 .tag .t { overflow: hidden; text-overflow: ellipsis; }
-.tag .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--c); flex: none; }
-/* Breathing while its sound plays, heard from another tag */
-.tag .dot.heard { animation: breathe 1.6s ease-in-out infinite; }
+/* A Space's mark, in its colour: a dot, or (a click on the one by the time
+   switches it, for every Space) three rounded bars. While the Space is heard
+   the dot fades out and back, and the bars rise and sink one by one, down to dots at
+   times (as a voice does); still, they rest as three dots. The open Space has
+   it beside the time, the others in their tags. */
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--c); flex: none; }
+.dot.heard { animation: blink 2s ease-in-out infinite; }
+/* Fades out to nothing and back */
+@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+.wave { display: inline-flex; align-items: center; gap: 2.5px; height: 12px; flex: none; }
+.wave i { width: 3px; height: 3px; border-radius: 99px; background: var(--c); animation: wave1 3.1s ease-in-out infinite; }
+.wave i:nth-child(2) { animation: wave2 2.7s ease-in-out infinite; }
+.wave i:nth-child(3) { animation: wave3 3.4s ease-in-out infinite; }
+.wave.still i { animation: none; height: 3px; }
+:root:not(.waves) .wave, :root.waves .dot { display: none; }
+.tag .sm { display: inline-flex; align-items: center; flex: none; }
+@keyframes wave1 { 0%, 14% { height: 11px; } 26%, 40% { height: 3px; } 52% { height: 7px; } 64%, 76% { height: 11px; } 88% { height: 5px; } 100% { height: 11px; } }
+@keyframes wave2 { 0%, 10% { height: 8px; } 22%, 44% { height: 3px; } 58% { height: 11px; } 70% { height: 6px; } 84%, 92% { height: 10px; } 100% { height: 8px; } }
+@keyframes wave3 { 0% { height: 6px; } 12%, 30% { height: 3px; } 42% { height: 9px; } 54%, 66% { height: 11px; } 80%, 90% { height: 3px; } 100% { height: 6px; } }
 .tag:hover { color: var(--fg); }
 .tag .tcopy { width: 24px; height: 24px; margin-right: -8px; border-radius: 50%; display: grid; place-items: center; opacity: .65; }
 .tag .tcopy svg { width: 14px; height: 14px; }
@@ -215,11 +244,32 @@ main { flex: 1; overflow-y: auto; padding: 4px 18px 10px; }
 .player { margin-top: 10px; }
 .deck { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .clock { font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Above a tag, for a moment: what the link of a Space on air just copied
+   holds; in the window's own colours, its point on the tag */
+.copy-note {
+  position: fixed; z-index: 20; pointer-events: none;
+  padding: 7px 12px 8px; border-radius: 12px; line-height: 1.3; white-space: nowrap;
+  background: var(--pop); color: var(--fg); box-shadow: 0 0 0 1px var(--line), 0 6px 18px var(--shade);
+  font-size: 12.5px; animation: pop .18s ease-out;
+}
+.copy-note b { display: block; font-weight: 700; }
+.copy-note span { display: block; color: var(--mu); font-weight: 600; font-variant-numeric: tabular-nums; }
+.copy-note::after {
+  content: ""; position: absolute; top: 100%; left: var(--point, 50%); width: 10px; height: 10px; margin: -6px 0 0 -6px;
+  background: var(--pop); transform: rotate(45deg); box-shadow: 1px 1px 0 var(--line);
+}
 #pos { font-size: 27px; font-weight: 700; letter-spacing: -.3px; }
 #dur { margin-left: 7px; font-size: 13px; font-weight: 600; color: var(--mu); }
-/* The Space's dot beside the time: still while paused, softly breathing while it plays */
-.live-dot { display: inline-block; width: 10px; height: 10px; margin-left: 12px; border-radius: 50%; background: var(--c); vertical-align: 3px; }
-.live-dot.on { animation: breathe 3.2s ease-in-out infinite; }
+/* The open Space's mark beside the time: still while paused, blinking or
+   moving while it plays; a click turns the dot into bars and back */
+.live-dot {
+  position: relative; display: inline-block; width: 24px; height: 24px; margin-left: 5px;
+  vertical-align: -4px; overflow: hidden; border-radius: 50%; cursor: pointer;
+}
+.live-dot > * { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+.live-dot .dot { width: 10px; height: 10px; }
+.live-dot.on .dot { animation: blink 2s ease-in-out infinite; }
+.live-dot:not(.on) .wave i { animation: none; height: 3px; }
 /* A Space on air: red while heard live, grey (back to live) otherwise */
 .live-pill {
   display: inline-flex; align-items: center; gap: 5px; margin-left: 12px; vertical-align: 4px;
@@ -283,6 +333,7 @@ main { flex: 1; overflow-y: auto; padding: 4px 18px 10px; }
 /* While marking, the button keeps its usual look, with a blinking red ring
    and the clip's length so far */
 #mark.rec { animation: rec 1.2s ease-in-out infinite; }
+#mark.rec.still { animation: none; box-shadow: 0 0 0 2px #e5484d; }
 #mark .rec-len { font-variant-numeric: tabular-nums; }
 @keyframes rec { 0%, 100% { box-shadow: 0 0 0 2px #e5484d; } 50% { box-shadow: 0 0 0 2px rgba(229, 72, 77, .12); } }
 .msg { flex: 1; min-width: 0; font-size: 12.5px; color: var(--mu); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
