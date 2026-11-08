@@ -1,6 +1,16 @@
 /* Spacecut — soft and rounded, light or dark. Colour belongs to the
    Spaces (one per tag); everything else stays grey. */
 
+/* Nunito (SIL Open Font License, fonts/OFL.txt) comes with the app: the
+   Mac's rounded font is not on Windows, and Nunito is close to it. On the
+   Mac the system's own comes first in --font. */
+@font-face {
+  font-family: "Nunito";
+  src: url("fonts/Nunito.ttf") format("truetype");
+  font-weight: 200 1000;
+  font-display: block;
+}
+
 :root {
   --bg: #f1f1f2;
   --bgimg: radial-gradient(130% 70% at 50% 0%, #ffffff 0%, #f8f8f9 38%, #f0f0f1 70%, #ebebec 100%);

@@ -257,6 +257,48 @@ fn set_mini(window: tauri::WebviewWindow, state: State<AppState>, on: bool, heig
     Ok(())
 }
 
+/// Where the window goes and how big its content is, to be whole on the
+/// screen's free area (`area`: left, top, width, height; without the taskbar
+/// or the Dock), or None when it already is. `at` and `outer` are the
+/// window's place and size with its frame, `frame` what the system adds
+/// around the content (on Windows, the title bar), `least` the smallest
+/// content allowed. All in the screen's own pixels.
+fn fit(area: (f64, f64, f64, f64), at: (f64, f64), outer: (f64, f64), frame: (f64, f64), least: (f64, f64)) -> Option<((f64, f64), (f64, f64))> {
+    let (left, top, width, height) = area;
+    let whole = at.0 >= left && at.1 >= top && at.0 + outer.0 <= left + width && at.1 + outer.1 <= top + height;
+    if whole {
+        return None;
+    }
+    let w = outer.0.min(width).max(least.0 + frame.0);
+    let h = outer.1.min(height).max(least.1 + frame.1);
+    let place = (left + ((width - w) / 2.0).max(0.0), top + ((height - h) / 2.0).max(0.0));
+    Some((place, (w - frame.0, h - frame.1)))
+}
+
+/// On opening: a window too big for its screen (a small one, or the title
+/// bar Windows adds above the content) is made smaller, never below the
+/// smallest size, and put in the middle, so that nothing is hidden below the
+/// screen's edge or the taskbar.
+fn fit_on_screen(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    let Some(screen) = window.current_monitor()? else { return Ok(()) };
+    let area = screen.work_area();
+    let (at, outer, inner) = (window.outer_position()?, window.outer_size()?, window.inner_size()?);
+    let scale = window.scale_factor()?;
+    let frame = (outer.width.saturating_sub(inner.width) as f64, outer.height.saturating_sub(inner.height) as f64);
+    let found = fit(
+        (area.position.x as f64, area.position.y as f64, area.size.width as f64, area.size.height as f64),
+        (at.x as f64, at.y as f64),
+        (outer.width as f64, outer.height as f64),
+        frame,
+        (460.0 * scale, 560.0 * scale),
+    );
+    if let Some(((x, y), (w, h))) = found {
+        window.set_size(tauri::PhysicalSize::new(w.round() as u32, h.round() as u32))?;
+        window.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32))?;
+    }
+    Ok(())
+}
+
 /// What plays, for the system's Now Playing and media keys.
 #[tauri::command]
 fn media_now(app: AppHandle, now: media::NowPlaying) {
@@ -410,6 +452,9 @@ fn main() {
             #[cfg(target_os = "macos")]
             add_update_item(app.handle())?;
             media::start(app.handle());
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = fit_on_screen(&window);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -453,4 +498,27 @@ fn main() {
                 state.player.shutdown();
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fit;
+
+    #[test]
+    fn a_window_too_tall_for_its_screen_is_made_to_fit() {
+        let least = (460.0, 560.0);
+        // Fits: left as it is
+        assert_eq!(fit((0.0, 0.0, 1920.0, 1032.0), (100.0, 50.0), (560.0, 772.0), (0.0, 32.0), least), None);
+        // The screen in a virtual machine: 765 high, 48 of it the taskbar;
+        // 740 of content and the 32 of the title bar don't fit
+        let ((x, y), (w, h)) = fit((0.0, 0.0, 1040.0, 717.0), (20.0, 20.0), (560.0, 772.0), (0.0, 32.0), least).unwrap();
+        assert_eq!((w, h), (560.0, 685.0));
+        assert_eq!((x, y), (240.0, 0.0));
+        // Never below the smallest size
+        let (_, (_, h)) = fit((0.0, 0.0, 800.0, 500.0), (0.0, 0.0), (560.0, 772.0), (0.0, 32.0), least).unwrap();
+        assert_eq!(h, 560.0);
+        // Whole but partly off the screen's free area: only moved
+        let ((_, y), (_, h)) = fit((0.0, 0.0, 1920.0, 1032.0), (0.0, 400.0), (560.0, 772.0), (0.0, 32.0), least).unwrap();
+        assert_eq!((y, h), (130.0, 740.0));
+    }
 }
