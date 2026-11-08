@@ -120,11 +120,6 @@ async fn pick_files(app: AppHandle, kind: String, multiple: bool) -> Result<Vec<
 }
 
 #[tauri::command]
-fn clipboard_read(app: AppHandle) -> String {
-    app.clipboard().read_text().unwrap_or_default()
-}
-
-#[tauri::command]
 fn clipboard_write(app: AppHandle, text: String) {
     let _ = app.clipboard().write_text(text);
 }
@@ -463,7 +458,6 @@ fn main() {
             save_effects,
             pick_folder,
             pick_files,
-            clipboard_read,
             clipboard_write,
             convert_live,
             player_load,

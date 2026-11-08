@@ -887,10 +887,14 @@ function pollLoop() {
   clearTimeout(S.pollTimer);
   poll().finally(() => {
     const busy = S.p.playing || S.p.loading || S.p.buffering || S.fxPath;
-    S.pollTimer = setTimeout(pollLoop, busy ? 120 : 1000);
+    // With the window out of sight (minimised, or behind others) nothing on
+    // it needs keeping up with: once a second is enough, for Now Playing
+    S.pollTimer = setTimeout(pollLoop, busy && !document.hidden ? 120 : 1000);
   });
 }
 const pollSoon = () => { clearTimeout(S.pollTimer); S.pollTimer = setTimeout(pollLoop, 60); };
+// In sight again: up to date at once
+document.addEventListener('visibilitychange', () => { if (!document.hidden) pollSoon(); });
 
 /** Draws the playhead on the next frame; frames keep coming only while it moves. */
 function kick() {
