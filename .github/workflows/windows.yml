@@ -1,0 +1,95 @@
+# Builds Spacecut for Windows, as a zip with no installer: a Spacecut folder
+# holding Spacecut.exe and, beside it, the bundled ffmpeg.exe (unchanged).
+# Started by hand: Actions → Windows build → Run workflow, or
+#   gh workflow run windows.yml
+# The zip is under the run's Artifacts, kept for 7 days.
+name: Windows build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      # Files exactly as in the repository (Git on Windows would otherwise
+      # change the line endings of the text files)
+      - run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # Tauri's own ready-made command, the version the Mac builds use
+      - name: Tauri CLI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download tauri-cli-v2.12.4 -R tauri-apps/tauri -p cargo-tauri-x86_64-pc-windows-msvc.zip -D $env:RUNNER_TEMP
+          Expand-Archive "$env:RUNNER_TEMP\cargo-tauri-x86_64-pc-windows-msvc.zip" "$env:RUNNER_TEMP\tauri-cli"
+          $cli = Get-ChildItem "$env:RUNNER_TEMP\tauri-cli" -Recurse -Filter cargo-tauri.exe | Select-Object -First 1
+          $bin = Join-Path ($env:CARGO_HOME ?? "$env:USERPROFILE\.cargo") bin
+          Copy-Item $cli.FullName (Join-Path $bin cargo-tauri.exe) -Force
+          cargo tauri --version
+
+      - name: Build
+        working-directory: src-tauri
+        run: cargo tauri build --no-bundle
+
+      - name: Zip
+        id: zip
+        run: |
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $name = "Spacecut_v$($version -replace '\.0$', '')-Windows.zip"
+          $dir = "$env:RUNNER_TEMP\out\Spacecut"
+          New-Item -ItemType Directory $dir -Force | Out-Null
+          Copy-Item src-tauri/target/release/spacecutter.exe "$dir\Spacecut.exe"
+          Copy-Item ffmpeg/windows/ffmpeg.exe "$dir\ffmpeg.exe"
+          Get-FileHash "$dir\ffmpeg.exe" | ForEach-Object { "ffmpeg.exe SHA-256 $($_.Hash)" }
+
+          # Nothing of a person's computer in the app: no folder under a
+          # Users or home folder other than this build machine's own
+          $text = [System.Text.Encoding]::Latin1.GetString([System.IO.File]::ReadAllBytes("$dir\Spacecut.exe"))
+          $paths = @([regex]::Matches($text, '(?i)\b[a-z]:[\\/]+users[\\/]+([^\\/\x00-\x1f"<>|:*?]+)')) +
+                   @([regex]::Matches($text, '(?<![\w.])/(?:Users|home)/([^/\x00-\x1f"<>|:*?]+)/'))
+          $personal = $paths | Where-Object { $_.Groups[1].Value -ne 'runneradmin' }
+          if ($personal) {
+            "Stopped: Spacecut.exe holds these paths:"
+            $personal | ForEach-Object { $_.Value } | Sort-Object -Unique
+            exit 1
+          }
+
+          New-Item -ItemType Directory dist -Force | Out-Null
+          $zip = Join-Path $PWD "dist\$name"
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::CreateFromDirectory($dir, $zip, 'Optimal', $true)
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+          $entries = ($archive.Entries.FullName | Sort-Object) -join ', '
+          $archive.Dispose()
+          if ($entries -ne 'Spacecut/ffmpeg.exe, Spacecut/Spacecut.exe') {
+            "Stopped: the zip holds $entries"
+            exit 1
+          }
+          "Ready: $name ($([math]::Round((Get-Item $zip).Length / 1MB)) MB), checked: no personal paths"
+          "name=$name" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/${{ steps.zip.outputs.name }}
+          archive: false
+          retention-days: 7
+          if-no-files-found: error
+
+      # The unit tests, on Windows (those that need the internet are left
+      # out, as on the Mac)
+      - name: Tests
+        working-directory: src-tauri
+        run: cargo test --locked
