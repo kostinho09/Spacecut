@@ -824,15 +824,44 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("spacecutter_parts_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let make = |name: &str, src: &str| {
+        // Two tones and a burst of noise, written here as 48 kHz stereo WAV
+        // (the app's ffmpeg has no sound generators); the tones made m4a by it
+        let wav = |name: &str, secs: f64, sample: &dyn Fn(usize) -> f64| {
+            let frames = (secs * 48000.0).round() as usize;
+            let size = (frames * 4) as u32;
+            let mut data = Vec::with_capacity(44 + frames * 4);
+            data.extend_from_slice(b"RIFF");
+            data.extend_from_slice(&(36 + size).to_le_bytes());
+            data.extend_from_slice(b"WAVEfmt ");
+            for field in [16u32, 1 | 2 << 16, 48000, 48000 * 4, 4 | 16 << 16] {
+                data.extend_from_slice(&field.to_le_bytes());
+            }
+            data.extend_from_slice(b"data");
+            data.extend_from_slice(&size.to_le_bytes());
+            for i in 0..frames {
+                let s = ((sample(i) * 32767.0) as i16).to_le_bytes();
+                data.extend_from_slice(&s);
+                data.extend_from_slice(&s);
+            }
             let path = dir.join(name);
-            let ok = Command::new(&ff).args(["-v", "error", "-f", "lavfi", "-i", src, "-ac", "2", "-y"]).arg(&path).status().unwrap().success();
+            fs::write(&path, data).unwrap();
+            path
+        };
+        let tone = |name: &str, hz: f64, secs: f64| {
+            let source = wav(&format!("{name}.wav"), secs, &|i| (i as f64 * hz * std::f64::consts::TAU / 48000.0).sin() * 0.5);
+            let path = dir.join(name);
+            let ok = Command::new(&ff).args(["-v", "error", "-i"]).arg(&source).args(["-ac", "2", "-y"]).arg(&path).status().unwrap().success();
             assert!(ok, "made {name}");
             path_str(&path)
         };
-        let a = make("a.m4a", "sine=frequency=1000:sample_rate=48000:duration=2");
-        let b = make("b.m4a", "sine=frequency=2000:sample_rate=48000:duration=1.5");
-        let fx = make("fx.wav", "anoisesrc=sample_rate=48000:duration=0.4:amplitude=0.3");
+        let a = tone("a.m4a", 1000.0, 2.0);
+        let b = tone("b.m4a", 2000.0, 1.5);
+        let noise = std::cell::Cell::new(0x2545_f491_u32);
+        let fx = path_str(&wav("fx.wav", 0.4, &|_| {
+            let x = noise.get().wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            noise.set(x);
+            (x as f64 / u32::MAX as f64 * 2.0 - 1.0) * 0.3
+        }));
         let clip = |id, url: &str| {
             let mut r = row(id, url, "", "", &format!("c{id}"));
             r.full = true;
