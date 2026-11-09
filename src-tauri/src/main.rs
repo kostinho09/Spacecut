@@ -445,8 +445,13 @@ fn main() {
             #[cfg(target_os = "macos")]
             add_update_item(app.handle())?;
             media::start(app.handle());
+            // The window is made hidden and centred (tauri.conf.json), sized
+            // to its screen here, and only then shown: it opens where it
+            // stays, without a jump. Shown even if fitting failed.
             if let Some(window) = app.get_webview_window("main") {
                 let _ = fit_on_screen(&window);
+                let _ = window.show();
+                let _ = window.set_focus();
             }
             Ok(())
         })
