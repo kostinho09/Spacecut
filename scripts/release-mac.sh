@@ -33,6 +33,12 @@ if [ -n "$found" ]; then
 fi
 find "$app" -name .DS_Store -delete
 
+# The whole app signed ad hoc (no Apple account): the build signs only the
+# program inside, which macOS takes for a damaged app once it is downloaded
+# ("can't be opened, move to the Bin") instead of offering Open Anyway
+codesign --force --deep --sign - "$app"
+codesign --verify --deep --strict "$app" || { echo "Stopped: the app's signature is not valid"; exit 1; }
+
 mkdir -p dist
 zip="dist/Spacecut_v$short-Mac.zip"
 rm -f "$zip"
@@ -42,4 +48,9 @@ if zipinfo -1 "$zip" | grep -E '(^|/)(\.DS_Store|__MACOSX)'; then
   echo "Stopped: the zip holds Finder files"
   exit 1
 fi
-echo "Ready: $zip ($(du -h "$zip" | cut -f1)), checked: no personal paths, no Finder files"
+# The signature as it arrives: the app unzipped elsewhere
+check=$(mktemp -d)
+ditto -x -k "$zip" "$check"
+codesign --verify --deep --strict "$check/Spacecut.app" || { echo "Stopped: the app in the zip has no valid signature"; rm -rf "$check"; exit 1; }
+rm -rf "$check"
+echo "Ready: $zip ($(du -h "$zip" | cut -f1)), checked: no personal paths, no Finder files, signature valid"
