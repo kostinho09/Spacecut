@@ -477,10 +477,10 @@ impl Worker<'_> {
                             a.extend(args!["-i", path_str(own), "-c", "copy", "-f", "mpegts", "-y", &ts]);
                             a
                         }
-                        None => args!["-i", url, "-c", "copy", "-f", "mpegts", "-y", &ts],
+                        None => [ffmpeg::input(url), args!["-c", "copy", "-f", "mpegts", "-y", &ts]].concat(),
                     }
                 }
-                _ => args!["-i", url, "-c", "copy", "-f", "mpegts", "-y", &ts],
+                _ => [ffmpeg::input(url), args!["-c", "copy", "-f", "mpegts", "-y", &ts]].concat(),
             },
             Some((s0, e0)) => {
                 let dur = (e0 - s0).to_string();
@@ -494,7 +494,7 @@ impl Worker<'_> {
                             a.extend(args!["-i", path_str(list), "-ss", format!("{offset:.3}"), "-t", dur, "-c", "copy", "-f", "mpegts", "-y", &ts]);
                             a
                         }
-                        None => args!["-ss", fmt_hms(s0), "-i", url, "-t", dur, "-c", "copy", "-f", "mpegts", "-y", &ts],
+                        None => [args!["-ss", fmt_hms(s0)], ffmpeg::input(url), args!["-t", dur, "-c", "copy", "-f", "mpegts", "-y", &ts]].concat(),
                     }
                 }
             }
@@ -518,12 +518,16 @@ impl Worker<'_> {
             self.status(id, "Converting");
             let mut a = Vec::new();
             match (span, &trim) {
-                (None, _) => a.extend(args!["-i", url]),
+                (None, _) => a.extend(ffmpeg::input(url)),
                 (Some((s0, e0)), Some((list, offset))) => {
                     a.extend(HLS_PROTOCOLS.iter().map(|s| s.to_string()));
                     a.extend(args!["-i", path_str(list), "-ss", format!("{offset:.3}"), "-t", (e0 - s0).to_string()]);
                 }
-                (Some((s0, e0)), None) => a.extend(args!["-ss", fmt_hms(s0), "-i", url, "-t", (e0 - s0).to_string()]),
+                (Some((s0, e0)), None) => {
+                    a.extend(args!["-ss", fmt_hms(s0)]);
+                    a.extend(ffmpeg::input(url));
+                    a.extend(args!["-t", (e0 - s0).to_string()]);
+                }
             }
             a.extend(AAC_44K.iter().map(|s| s.to_string()));
             a.extend(args!["-y", &m4a]);

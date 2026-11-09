@@ -20,20 +20,28 @@ jobs:
       # change the line endings of the text files)
       - run: git config --global core.autocrlf false
 
-      - uses: actions/checkout@v7
+      # Each action fixed to the commit checked, not to a tag that its owner
+      # (or someone who took over the account) could move to other code
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-11
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: src-tauri
 
-      # Tauri's own ready-made command, the version the Mac builds use
+      # Tauri's own ready-made command, the version the Mac builds use; used
+      # only if it is byte for byte the file checked (its SHA-256 is the one
+      # GitHub recorded when Tauri's build uploaded it)
       - name: Tauri CLI
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release download tauri-cli-v2.12.4 -R tauri-apps/tauri -p cargo-tauri-x86_64-pc-windows-msvc.zip -D $env:RUNNER_TEMP
+          $hash = (Get-FileHash "$env:RUNNER_TEMP\cargo-tauri-x86_64-pc-windows-msvc.zip" -Algorithm SHA256).Hash
+          if ($hash -ne '3E8687FB184BD7F10EBD8642F7715F79F4A605C0694C142A21507E8A24DC0F8B') { "Stopped: the Tauri CLI download is not the file checked ($hash)"; exit 1 }
           Expand-Archive "$env:RUNNER_TEMP\cargo-tauri-x86_64-pc-windows-msvc.zip" "$env:RUNNER_TEMP\tauri-cli"
           $cli = Get-ChildItem "$env:RUNNER_TEMP\tauri-cli" -Recurse -Filter cargo-tauri.exe | Select-Object -First 1
           $bin = Join-Path ($env:CARGO_HOME ?? "$env:USERPROFILE\.cargo") bin
@@ -81,7 +89,7 @@ jobs:
           "Ready: $name ($([math]::Round((Get-Item $zip).Length / 1MB)) MB), checked: no personal paths"
           "name=$name" >> $env:GITHUB_OUTPUT
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           path: dist/${{ steps.zip.outputs.name }}
           archive: false

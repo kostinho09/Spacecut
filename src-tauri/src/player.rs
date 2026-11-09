@@ -907,7 +907,7 @@ fn decode(
         }
         Source::Direct(input) => {
             let from = format!("{at:.3}");
-            cmd.args(["-ss", from.as_str(), "-i", input.as_str(), "-vn"]).stdin(Stdio::null());
+            cmd.args(["-ss", from.as_str()]).args(crate::ffmpeg::input(input)).arg("-vn").stdin(Stdio::null());
         }
     }
     if (speed - 1.0).abs() > 1e-6 {

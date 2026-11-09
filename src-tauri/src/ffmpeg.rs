@@ -142,10 +142,22 @@ fn parse_clock(s: &str) -> Option<f64> {
     (secs >= 0.0).then_some(secs)
 }
 
+/// `-i` and the input, which may be a link from the internet: then ffmpeg
+/// may follow it, and what it names (a playlist's pieces), only to the
+/// internet, never to this computer's files. A local file is left as it was.
+pub fn input(input: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    if input.starts_with("http://") || input.starts_with("https://") {
+        args.extend(["-protocol_whitelist".to_string(), "http,https,tcp,tls,crypto".to_string()]);
+    }
+    args.extend(["-i".to_string(), input.to_string()]);
+    args
+}
+
 /// What `ffmpeg -i` prints about a file, without decoding it.
 fn describe(ffmpeg: &Path, input: &str) -> String {
     let mut cmd = Command::new(ffmpeg);
-    cmd.args(["-hide_banner", "-i", input]).stdin(Stdio::null()).stdout(Stdio::null());
+    cmd.arg("-hide_banner").args(self::input(input)).stdin(Stdio::null()).stdout(Stdio::null());
     quiet(&mut cmd);
     cmd.output().map(|o| String::from_utf8_lossy(&o.stderr).into_owned()).unwrap_or_default()
 }
@@ -176,4 +188,19 @@ pub fn probe_duration(ffmpeg: &Path, input: &str) -> Option<f64> {
     let m: f64 = caps[2].parse().ok()?;
     let s: f64 = caps[3].parse().ok()?;
     Some(h * 3600.0 + m * 60.0 + s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_link_from_the_internet_leads_only_to_the_internet() {
+        let remote = input("https://prod-fastly-a.video.pscp.tv/a/playlist_1.m3u8?type=replay");
+        assert_eq!(remote[..2], ["-protocol_whitelist", "http,https,tcp,tls,crypto"]);
+        assert!(!remote[1].contains("file"));
+        assert_eq!(remote[2..], ["-i", "https://prod-fastly-a.video.pscp.tv/a/playlist_1.m3u8?type=replay"]);
+        assert_eq!(input("/Users/Shared/clip.mp4"), ["-i", "/Users/Shared/clip.mp4"]);
+        assert_eq!(input(r"C:\clips\clip.mp4"), ["-i", r"C:\clips\clip.mp4"]);
+    }
 }

@@ -55,7 +55,23 @@ pub fn clean_name(name: &str) -> String {
         .chars()
         .map(|c| if forbidden.contains(&c) || c.is_control() { '-' } else { c })
         .collect();
-    cleaned.trim_end_matches(['.', ' ']).to_string()
+    let cleaned = cleaned.trim_end_matches(['.', ' ']).to_string();
+    if cfg!(windows) && reserved_on_windows(&cleaned) {
+        format!("{cleaned}_")
+    } else {
+        cleaned
+    }
+}
+
+/// Names Windows keeps for devices, whatever follows a dot: a file called
+/// "CON" or "nul.m4a" can't be made (or vanishes, for NUL).
+fn reserved_on_windows(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.as_bytes()[3].is_ascii_digit()
+            && stem.as_bytes()[3] != b'0')
 }
 
 #[cfg(test)]
@@ -75,5 +91,15 @@ mod tests {
     #[test]
     fn cleans_file_names() {
         assert_eq!(clean_name("  part 1/2: intro. "), "part 1-2- intro");
+    }
+
+    #[test]
+    fn knows_the_names_windows_keeps() {
+        for name in ["CON", "con", "Nul", "nul.part", "PRN", "aux", "COM1", "lpt9", "CONIN$"] {
+            assert!(reserved_on_windows(name), "{name}");
+        }
+        for name in ["CONTENT", "console", "Null", "COM0", "COM10", "LPT", "my nul", "Space 1"] {
+            assert!(!reserved_on_windows(name), "{name}");
+        }
     }
 }
