@@ -14,8 +14,11 @@
 #   scripts/ffmpeg/build.sh windows <output file>   in MSYS2's MINGW64 shell
 set -euo pipefail
 
-VERSION=8.0
-SHA256=b2751fccb6cc4c77708113cd78b561059b6fa904b24162fa0be2d60273d27b8e
+# FFmpeg 8.0.3, the 8.0 series with its fixes. Its signature was checked with
+# FFmpeg's release key (FCF986EA15E6E293A5644F10B4322F04D67658D8, as on
+# ffmpeg.org/download.html); the checksum below is that source's.
+VERSION=8.0.3
+SHA256=6136812ea6d4e68bdba27e33c2a94382711cdf4f8602ffef056ff792bd6f9818
 
 platform=${1:?mac or windows}
 output=${2:?where to put the ffmpeg built}
