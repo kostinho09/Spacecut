@@ -95,15 +95,13 @@ async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
 async fn pick_files(app: AppHandle, kind: String, multiple: bool) -> Result<Vec<String>, String> {
     blocking(move || {
         let dialog = app.dialog().file().set_directory(util::home_dir());
+        use cutter::{AAC_EXTS, AUDIO_EXTS, VIDEO_EXTS};
+        let sound = AAC_EXTS[..2].iter().chain(&AUDIO_EXTS);
         let dialog = if kind == "effect" {
-            dialog
-                .set_title("Select Sound Effect")
-                .add_filter("Audio", &["mp3", "m4a", "wav", "aac", "flac", "ogg", "aiff"])
+            dialog.set_title("Select Sound Effect").add_filter("Audio", &sound.copied().collect::<Vec<_>>())
         } else {
-            dialog.set_title("Select Audio or Video File").add_filter(
-                "Audio & Video",
-                &["mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "ts", "aiff", "mp4", "mkv", "mov", "avi", "webm", "m4v", "flv"],
-            )
+            let all: Vec<&str> = sound.chain(&AAC_EXTS[2..]).chain(&VIDEO_EXTS).copied().collect();
+            dialog.set_title("Select Audio or Video File").add_filter("Audio & Video", &all)
         };
         let picked = if multiple {
             dialog.blocking_pick_files().unwrap_or_default()

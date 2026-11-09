@@ -25,8 +25,14 @@ macro_rules! args {
     ($($a:expr),* $(,)?) => { vec![$(String::from($a)),*] };
 }
 
-const VIDEO_EXTS: [&str; 11] = ["mp4", "mkv", "mov", "avi", "webm", "m4v", "flv", "wmv", "mpg", "mpeg", "3gp"];
-const AUDIO_EXTS: [&str; 8] = ["mp3", "wav", "flac", "ogg", "aiff", "aif", "wma", "opus"];
+// The local files the app takes, by kind: the file pickers offer these and
+// dropping takes them (MEDIA_EXTS in ui/app.js is the same list)
+/// Video: the sound copied out as it is, or made AAC if it can't be
+pub(crate) const VIDEO_EXTS: [&str; 11] = ["mp4", "mkv", "mov", "avi", "webm", "m4v", "flv", "wmv", "mpg", "mpeg", "3gp"];
+/// Sound in other formats: made AAC
+pub(crate) const AUDIO_EXTS: [&str; 9] = ["mp3", "wav", "flac", "ogg", "aiff", "aif", "wma", "opus", "dts"];
+/// Already AAC (or MPEG-TS with AAC, as a Space's pieces): copied as it is
+pub(crate) const AAC_EXTS: [&str; 3] = ["m4a", "aac", "ts"];
 const AAC_44K: [&str; 8] = ["-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "192k"];
 const HLS_PROTOCOLS: [&str; 2] = ["-protocol_whitelist", "file,http,https,tcp,tls,crypto"];
 
@@ -813,6 +819,18 @@ mod tests {
         }
         let _ = fs::remove_dir_all(&dir);
         assert!((across - 70.0).abs() < 0.6);
+    }
+
+    /// What can be dropped on the window is what the file picker offers.
+    #[test]
+    fn dropping_takes_what_the_picker_offers() {
+        let js = include_str!("../../ui/app.js");
+        let list = js.split("const MEDIA_EXTS = [").nth(1).unwrap().split(']').next().unwrap();
+        let mut dropped: Vec<&str> = list.split(',').map(|s| s.trim().trim_matches('\'')).filter(|s| !s.is_empty()).collect();
+        let mut picked: Vec<&str> = AAC_EXTS.iter().chain(&AUDIO_EXTS).chain(&VIDEO_EXTS).copied().collect();
+        dropped.sort_unstable();
+        picked.sort_unstable();
+        assert_eq!(dropped, picked);
     }
 
     /// Merges short tone clips with a 0.5 s silence and effects at the start,

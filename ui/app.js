@@ -76,7 +76,9 @@ function autoFormat(v) {
   return d.length === 6 ? `${d.slice(0, 2)}:${d.slice(2, 4)}:${d.slice(4)}` : v;
 }
 
-const MEDIA_EXTS = ['mp3', 'm4a', 'aac', 'wav', 'flac', 'ogg', 'opus', 'ts', 'aiff',
+// The local files taken when dropped: the same as the file picker's
+// (AAC_EXTS, AUDIO_EXTS and VIDEO_EXTS in cutter.rs)
+const MEDIA_EXTS = ['m4a', 'aac', 'ts', 'mp3', 'wav', 'flac', 'ogg', 'aiff', 'aif', 'wma', 'opus', 'dts',
   'mp4', 'mkv', 'mov', 'avi', 'webm', 'm4v', 'flv', 'wmv', 'mpg', 'mpeg', '3gp'];
 const baseName = p => p.split(/[\\/]/).pop();
 const stem = p => baseName(p).replace(/\.[^.]+$/, '');
