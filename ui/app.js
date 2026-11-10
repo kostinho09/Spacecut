@@ -1753,9 +1753,14 @@ const HELP = {
 6. Right-click it → Copy → Copy URL.
 7. Paste it into the field at the top of Spacecut. It will <strong>automatically</strong> be converted into a <strong>Replay link</strong>.
 
+<b>For a Recorded Space That Has Ended</b>1. Open the Space in your browser.
+2. Press F12 and go to the <strong>Network</strong> tab. Enter <code>m3u8</code> in the filter box <strong>before</strong> pressing Play.
+3. Click <strong>Play recording</strong>.
+4. Look for a request containing <code>playlist_….m3u8?type=replay</code>.
+5. Right-click it → Copy → Copy URL, and paste it into Spacecut.
+
 <b>Good to Know</b><strong>Dynamic</strong> and <strong>Replay links</strong> stop working 30 days after the Space has ended. Cut whatever you want to keep before then.
-Save the <strong>Dynamic link</strong> in a note while the Space is live, so you can still retrieve the <strong>Replay link</strong> later.
-Already have a <strong>Replay link</strong> (<code>…playlist_….m3u8?type=replay</code>)? Paste it directly. There's nothing to convert.`,
+Save the <strong>Dynamic link</strong> in a note while the Space is live, so you can still retrieve the <strong>Replay link</strong> later.`,
   app: `<b>Add a Space</b>Paste a <strong>Dynamic link</strong> or <strong>Replay link</strong> into the field at the top. Each Space gets its own coloured tag. Click the <strong>Copy</strong> icon inside a tag to copy its Replay link, whether you want to listen to the Space in your browser or share it with others. Right-click a tag to rename it, add the entire Space as a single clip, or remove it.
 
 <b>Why Add a File?</b>Many people already have screen recordings of Spaces saved as video files. Spacecut makes it easy to convert them into <code>.m4a</code> audio files. <strong>Merge</strong> lets you combine clips from the same Space, different Spaces, or even older clips you've previously saved, with or without Spacecut, into one continuous audio file.
