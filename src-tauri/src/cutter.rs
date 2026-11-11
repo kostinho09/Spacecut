@@ -103,19 +103,42 @@ pub fn start(app: AppHandle, ffmpeg: Option<PathBuf>, ctl: Arc<Control>, job: Jo
         let emit = |name: &str, payload: Value| {
             let _ = app.emit(name, payload);
         };
-        run_job(&emit, ffmpeg, &ctl, &job);
+        let ended = run_job(&emit, ffmpeg, &ctl, &job);
         ctl.running.store(false, Ordering::SeqCst);
-        emit("job-done", json!({ "cancelled": ctl.cancel.load(Ordering::SeqCst) }));
+        emit("job-done", job_done(ctl.cancel.load(Ordering::SeqCst), &ended));
     });
     Ok(())
 }
 
-pub(crate) fn run_job(emit: Emit, ffmpeg: Option<PathBuf>, ctl: &Control, job: &Job) {
+/// How a job ended, beyond each clip's own status.
+#[derive(Default)]
+pub(crate) struct Ended {
+    /// The merge: None when none was made (none asked for, nothing to join,
+    /// or cancelled); otherwise saved, or why not.
+    merged: Option<Result<(), &'static str>>,
+    /// The clips were taken away after the merge (Keep clips off).
+    dropped: bool,
+}
+
+/// The job's last word to the window, so it can say what is in the folder
+/// now: `merged` (null without a merge), `merge_error` (why it failed) and
+/// `kept` (whether the clips are still there).
+fn job_done(cancelled: bool, ended: &Ended) -> Value {
+    json!({
+        "cancelled": cancelled,
+        "merged": ended.merged.map(|m| m.is_ok()),
+        "merge_error": ended.merged.and_then(Result::err),
+        "kept": !ended.dropped,
+    })
+}
+
+pub(crate) fn run_job(emit: Emit, ffmpeg: Option<PathBuf>, ctl: &Control, job: &Job) -> Ended {
+    let mut ended = Ended::default();
     let rows: Vec<&Row> = job.rows.iter().filter(|r| !r.url.trim().is_empty()).collect();
-    let Some(first) = rows.first() else { return };
+    let Some(first) = rows.first() else { return ended };
     let Some(ffmpeg) = ffmpeg else {
         emit("job-status", json!({ "id": first.id, "status": "FFmpeg Not Found" }));
-        return;
+        return ended;
     };
     let out = PathBuf::from(&job.output_folder);
     let _ = fs::create_dir_all(&out);
@@ -143,14 +166,16 @@ pub(crate) fn run_job(emit: Emit, ffmpeg: Option<PathBuf>, ctl: &Control, job: &
     if job.merge && !clips.is_empty() && !worker.cancelled() {
         emit("job-note", json!({ "text": "Merging…" }));
         worker.begin(cuts * 0.3);
-        worker.merge(&clips, job);
+        ended.merged = worker.merge(&clips, job);
         worker.finish_item();
         if !job.keep_clips {
             for (clip, _) in &clips {
                 let _ = fs::remove_file(clip);
             }
+            ended.dropped = true;
         }
     }
+    ended
 }
 
 fn live_of(row: &Row) -> Option<&str> {
@@ -357,7 +382,11 @@ impl Worker<'_> {
         };
 
         let m4a_file = unique(&self.out, &base, "m4a");
-        let ts_file = m4a_file.with_extension("ts");
+        // The copy on its way to the .m4a has a name of its own, so it never
+        // takes the place of a file already there: one of the user's, or the
+        // very .ts being cut
+        let stem = m4a_file.file_stem().map_or_else(|| base.clone(), |s| s.to_string_lossy().into_owned());
+        let ts_file = unique(&self.out, &format!("{stem}.part"), "ts");
         let (ts, m4a) = (path_str(&ts_file), path_str(&m4a_file));
 
         let local = Path::new(url).exists();
@@ -608,7 +637,8 @@ impl Worker<'_> {
     /// around. (Parts joined as separate MPEG-TS files lost or overlapped
     /// sound at every join, since such files under-report their length, and
     /// one too short to read, a 0.5 s silence say, ended the join there.)
-    fn merge(&self, clips: &[(PathBuf, f64)], job: &Job) {
+    /// None if cancelled; otherwise saved, or why it couldn't be.
+    fn merge(&self, clips: &[(PathBuf, f64)], job: &Job) -> Option<Result<(), &'static str>> {
         let (rate, channels, bitrate) = ffmpeg::probe_audio(&self.ffmpeg, &clips[0].0);
         let layout = if channels == 1 { "mono" } else { "stereo" };
         // A gap set on one separator also applies wherever none was set.
@@ -636,7 +666,7 @@ impl Worker<'_> {
         }
         parts.extend(insert("j_after", 0.0));
         if self.cancelled() {
-            return;
+            return None;
         }
 
         let mut a = Vec::new();
@@ -660,10 +690,14 @@ impl Worker<'_> {
         let total = parts.iter().map(|p| p.1).sum::<f64>().max(1.0);
         self.step(0.0, 1.0, total);
         let out = self.ff(a, None);
-        if !out.ok && !self.cancelled() {
-            let _ = fs::remove_file(&merged);
-            (self.emit)("job-note", json!({ "text": format!("Could not merge the clips: {}", explain(&out.stderr, &self.out)) }));
+        if self.cancelled() {
+            return None;
         }
+        if !out.ok {
+            let _ = fs::remove_file(&merged);
+            return Some(Err(explain(&out.stderr, &self.out)));
+        }
+        Some(Ok(()))
     }
 }
 
@@ -693,6 +727,38 @@ mod tests {
 
     fn length(path: &Path) -> f64 {
         ffmpeg::probe_duration(&ffmpeg::locate(None).unwrap(), &path_str(path)).unwrap_or(0.0)
+    }
+
+    /// A 48 kHz stereo WAV of `secs`, each sample from `sample` (the app's
+    /// ffmpeg has no sound generators to make one).
+    fn write_wav(path: &Path, secs: f64, sample: &dyn Fn(usize) -> f64) {
+        let frames = (secs * 48000.0).round() as usize;
+        let size = (frames * 4) as u32;
+        let mut data = Vec::with_capacity(44 + frames * 4);
+        data.extend_from_slice(b"RIFF");
+        data.extend_from_slice(&(36 + size).to_le_bytes());
+        data.extend_from_slice(b"WAVEfmt ");
+        for field in [16u32, 1 | 2 << 16, 48000, 48000 * 4, 4 | 16 << 16] {
+            data.extend_from_slice(&field.to_le_bytes());
+        }
+        data.extend_from_slice(b"data");
+        data.extend_from_slice(&size.to_le_bytes());
+        for i in 0..frames {
+            let s = ((sample(i) * 32767.0) as i16).to_le_bytes();
+            data.extend_from_slice(&s);
+            data.extend_from_slice(&s);
+        }
+        fs::write(path, data).unwrap();
+    }
+
+    /// A 440 Hz tone of `secs` as `out`, made by the app's ffmpeg with `args`.
+    fn tone(dir: &Path, secs: f64, args: &[&str], out: &Path) {
+        let wav = dir.join(format!("tone_{secs}.wav"));
+        write_wav(&wav, secs, &|i| (i as f64 * 440.0 * std::f64::consts::TAU / 48000.0).sin() * 0.5);
+        let ff = ffmpeg::locate(None).unwrap();
+        let ok = Command::new(&ff).args(["-v", "error", "-i"]).arg(&wav).args(args).arg(out).status().unwrap().success();
+        assert!(ok, "made {}", out.display());
+        fs::remove_file(&wav).unwrap();
     }
 
     #[test]
@@ -849,24 +915,8 @@ mod tests {
         // Two tones and a burst of noise, written here as 48 kHz stereo WAV
         // (the app's ffmpeg has no sound generators); the tones made m4a by it
         let wav = |name: &str, secs: f64, sample: &dyn Fn(usize) -> f64| {
-            let frames = (secs * 48000.0).round() as usize;
-            let size = (frames * 4) as u32;
-            let mut data = Vec::with_capacity(44 + frames * 4);
-            data.extend_from_slice(b"RIFF");
-            data.extend_from_slice(&(36 + size).to_le_bytes());
-            data.extend_from_slice(b"WAVEfmt ");
-            for field in [16u32, 1 | 2 << 16, 48000, 48000 * 4, 4 | 16 << 16] {
-                data.extend_from_slice(&field.to_le_bytes());
-            }
-            data.extend_from_slice(b"data");
-            data.extend_from_slice(&size.to_le_bytes());
-            for i in 0..frames {
-                let s = ((sample(i) * 32767.0) as i16).to_le_bytes();
-                data.extend_from_slice(&s);
-                data.extend_from_slice(&s);
-            }
             let path = dir.join(name);
-            fs::write(&path, data).unwrap();
+            write_wav(&path, secs, sample);
             path
         };
         let tone = |name: &str, hz: f64, secs: f64| {
@@ -900,6 +950,68 @@ mod tests {
         let merged = length(&out.join("merged.m4a"));
         println!("parts {parts:.3} s, merged {merged:.3} s");
         assert!((merged - parts).abs() < 0.05, "every part is in the merged file: {merged:.3} s of {parts:.3} s");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A clip's copy on its way to the .m4a never takes the place of a file
+    /// already in the folder: here the very .ts being cut, and a .ts of the
+    /// user's named as the next clip. Both were once written over, then deleted.
+    #[test]
+    fn the_copy_on_its_way_takes_no_files_place() {
+        let dir = std::env::temp_dir().join(format!("spacecutter_inplace_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("src")).unwrap();
+        let talk = dir.join("Talk.ts");
+        tone(&dir.join("src"), 3.0, &["-c:a", "aac", "-f", "mpegts", "-y"], &talk);
+        let other = dir.join("src/other.m4a");
+        tone(&dir.join("src"), 2.0, &["-c:a", "aac", "-y"], &other);
+        let notes = dir.join("Notes.ts");
+        fs::write(&notes, b"the user's own notes").unwrap();
+        let before = fs::read(&talk).unwrap();
+
+        let rows = vec![row(1, &path_str(&talk), "00:00:00", "00:00:02", "Talk"), row(2, &path_str(&other), "00:00:00", "00:00:01", "Notes")];
+        let events = run(&Job { rows, output_folder: path_str(&dir), merge: false, merge_name: String::new(), keep_clips: true, jingles: HashMap::new() });
+        assert!(fs::read(&talk).is_ok_and(|now| now == before), "the .ts being cut is as it was: {events:#?}");
+        assert_eq!(fs::read(&notes).ok().as_deref(), Some(&b"the user's own notes"[..]), "the user's .ts is as it was");
+        let (a, b) = (length(&dir.join("Talk.m4a")), length(&dir.join("Notes.m4a")));
+        assert!((a - 2.0).abs() < 0.3 && (b - 1.0).abs() < 0.3, "clips of {a:.2} s and {b:.2} s");
+        let mut names: Vec<String> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, ["Notes.m4a", "Notes.ts", "Talk.m4a", "Talk.ts", "src"], "nothing left over on the way");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// What the window is told at the end, so it can say what is in the
+    /// folder: a merge that failed and why, whether the clips are still
+    /// there, or that the merged file is all there is.
+    #[test]
+    fn says_how_the_merge_went() {
+        let dir = std::env::temp_dir().join(format!("spacecutter_merged_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("src")).unwrap();
+        let sound = dir.join("src/sound.m4a");
+        tone(&dir.join("src"), 2.0, &["-c:a", "aac", "-y"], &sound);
+        // A sound effect that isn't sound at all
+        let broken = dir.join("src/broken.mp3");
+        fs::write(&broken, b"not a sound").unwrap();
+        let job = |out: &str, effect: &Path, keep: bool| {
+            let mut jingles = HashMap::new();
+            jingles.insert("j_0".to_string(), Jingle { path: path_str(effect), gap: 0.0 });
+            let rows = vec![row(1, &path_str(&sound), "00:00:00", "00:00:01", "a"), row(2, &path_str(&sound), "00:00:01", "00:00:02", "b")];
+            Job { rows, output_folder: path_str(&dir.join(out)), merge: true, merge_name: "both".into(), keep_clips: keep, jingles }
+        };
+        let end = |job: &Job| job_done(false, &run_job(&|_: &str, _: Value| {}, ffmpeg::locate(None), &Control::default(), job));
+        let why = "There's no audio in this that Spacecut can read";
+
+        assert_eq!(end(&job("kept", &broken, true)), json!({ "cancelled": false, "merged": false, "merge_error": why, "kept": true }));
+        assert!(dir.join("kept/a.m4a").exists() && dir.join("kept/b.m4a").exists() && !dir.join("kept/both.m4a").exists());
+        assert_eq!(end(&job("dropped", &broken, false)), json!({ "cancelled": false, "merged": false, "merge_error": why, "kept": false }));
+        assert_eq!(end(&job("merged", Path::new(""), false)), json!({ "cancelled": false, "merged": true, "merge_error": null, "kept": false }));
+        assert!((length(&dir.join("merged/both.m4a")) - 2.0).abs() < 0.3, "the merged file is there");
+        assert_eq!(end(&job("both", Path::new(""), true)), json!({ "cancelled": false, "merged": true, "merge_error": null, "kept": true }));
+        let mut plain = job("plain", Path::new(""), true);
+        plain.merge = false;
+        assert_eq!(end(&plain), json!({ "cancelled": false, "merged": null, "merge_error": null, "kept": true }));
         let _ = fs::remove_dir_all(&dir);
     }
 

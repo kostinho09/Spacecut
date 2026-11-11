@@ -1557,15 +1557,34 @@ listen('job-note', ({ payload }) => { if (!S.cancelled) setStatus(payload.text);
 
 listen('job-done', ({ payload }) => {
   if (S.cancelled || payload.cancelled) { S.cancelled = false; return; }
-  const failed = S.clips.some(c => STATUS[c.status]?.[1] === 'bad');
   setRunning(false);
   const saved = S.clips.filter(c => c.status === 'Done').length;
   const lost = S.clips.filter(c => STATUS[c.status]?.[1] === 'bad').length;
-  const done = failed ? `${saved} saved, ${lost} couldn't be cut`
-    : `${saved} clip${saved === 1 ? '' : 's'} saved to ${baseName(S.env.output_folder)}`;
-  setStatus(failed ? `${done} — hover the red ! to see why` : `✓ ${done}`, failed ? 'bad' : 'ok');
-  invoke('notify_done', { body: done }).catch(() => {});
+  const end = jobEnd(saved, lost, baseName(S.env.output_folder), payload);
+  setStatus(end.status, end.kind);
+  invoke('notify_done', { body: end.body }).catch(() => {});
 });
+
+/**
+ * What a finished cut says: what is in the folder now, and what went wrong.
+ * From the job: `merged` (null without a merge, false if it failed),
+ * `merge_error` (why) and `kept` (whether the clips are still there).
+ */
+function jobEnd(saved, lost, folder, { merged = null, merge_error: why = '', kept = true }) {
+  const clips = `${saved} clip${saved === 1 ? '' : 's'}`;
+  if (merged === false) {
+    const body = kept ? `${clips} saved, but could not merge them: ${why}` : `Could not merge the clips: ${why}`;
+    return { status: body, body, kind: 'bad' };
+  }
+  // Without the clips, the merged file is all there is
+  const what = merged && !kept ? 'Merged file' : '';
+  if (lost) {
+    const body = `${what || saved} saved, ${lost} couldn't be cut`;
+    return { status: `${body} — hover the red ! to see why`, body, kind: 'bad' };
+  }
+  const body = `${what || clips} saved to ${folder}`;
+  return { status: `✓ ${body}`, body, kind: 'ok' };
+}
 
 /** A clip that changes after a cut loses its tick (or its error). */
 function touched(c) {
