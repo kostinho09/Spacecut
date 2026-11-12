@@ -9,12 +9,10 @@
 # It stops, and makes no zip, if the app still holds a path from the home
 # folder or the user's name.
 #
-# Use: scripts/release-mac.sh        → dist/Spacecut_v<version>-Mac.zip
+# Use: scripts/release-mac.sh        → dist/Spacecut-Mac.zip
+# (the same name in every version: the README links to it in the latest release)
 set -euo pipefail
 cd "$(dirname "$0")/.."
-
-version=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' src-tauri/tauri.conf.json | head -1)
-short=${version%.0}
 
 # Built apart from the everyday builds, so neither has to start over
 export CARGO_TARGET_DIR="$PWD/src-tauri/target/release-clean"
@@ -40,7 +38,7 @@ codesign --force --deep --sign - "$app"
 codesign --verify --deep --strict "$app" || { echo "Stopped: the app's signature is not valid"; exit 1; }
 
 mkdir -p dist
-zip="dist/Spacecut_v$short-Mac.zip"
+zip="dist/Spacecut-Mac.zip"
 rm -f "$zip"
 ditto -c -k --norsrc --noextattr --keepParent "$app" "$zip"
 

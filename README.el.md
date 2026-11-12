@@ -45,9 +45,11 @@
 
 ## Λήψη
 
-Κατεβάστε την έκδοση 2.0 από τη σελίδα [Releases](../../releases/latest):
-* macOS (11 ή νεότερο, Apple silicon): `Spacecut_v2.0-Mac.zip`, μία εφαρμογή, το `Spacecut.app` (το FFmpeg είναι μέσα της)
-* Windows (10 ή 11, 64-bit): `Spacecut_v2.0-Windows.zip`, ένας φάκελος `Spacecut` με δύο αρχεία: το `Spacecut.exe` και δίπλα του το `ffmpeg.exe`. Κρατήστε τα μαζί.
+Κάθε σύνδεσμος κατεβάζει αμέσως την πιο πρόσφατη έκδοση:
+* **[Λήψη για macOS](https://github.com/kostinho09/Spacecut/releases/latest/download/Spacecut-Mac.zip)** (11 ή νεότερο, Apple silicon): μία εφαρμογή, το `Spacecut.app` (το FFmpeg είναι μέσα της)
+* **[Λήψη για Windows](https://github.com/kostinho09/Spacecut/releases/latest/download/Spacecut-Windows.zip)** (10 ή 11, 64-bit): ένας φάκελος `Spacecut` με δύο αρχεία: το `Spacecut.exe` και δίπλα του το `ffmpeg.exe`. Κρατήστε τα μαζί.
+
+Τι άλλαξε σε κάθε έκδοση θα το βρείτε στη σελίδα [Releases](../../releases).
 
 > [!IMPORTANT]
 > Το Spacecut δεν είναι (ακόμα) notarized από την Apple ούτε υπογεγραμμένο με πιστοποιητικό υπογραφής κώδικα της Microsoft, γι' αυτό το macOS και τα Windows θα σας προειδοποιήσουν ότι προέρχεται από άγνωστο developer την πρώτη φορά που θα το ανοίξετε. Αυτό είναι αναμενόμενο, μην πανικοβάλλεστε. Τα Windows βγάζουν αυτό το μήνυμα για κάθε app που δεν έχει πληρώσει τη Microsoft για ένα certificate επαλήθευσης. Το Spacecut είναι δωρεάν εργαλείο και δεν έχει λόγο να ξοδέψει εκατοντάδες δολάρια για να εξαφανίσει ένα παράθυρο.
@@ -113,6 +115,11 @@
 
 
 ---
+
+## Επικοινωνία
+
+- **Σχόλια, ερωτήσεις, αναφορές σφαλμάτων και ιδέες για νέες λειτουργίες:** [στείλτε τα με αυτή τη φόρμα](https://tally.so/r/VpQMDj). Αφήστε το email σας μόνο αν θέλετε απάντηση.
+- **X:** [@kostinho__](https://x.com/kostinho__)
 
 ## Απόρρητο
 

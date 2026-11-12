@@ -55,8 +55,8 @@ jobs:
       - name: Zip
         id: zip
         run: |
-          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
-          $name = "Spacecut_v$($version -replace '\.0$', '')-Windows.zip"
+          # The same name in every version: the README links to it in the latest release
+          $name = "Spacecut-Windows.zip"
           $dir = "$env:RUNNER_TEMP\out\Spacecut"
           New-Item -ItemType Directory $dir -Force | Out-Null
           Copy-Item src-tauri/target/release/spacecutter.exe "$dir\Spacecut.exe"

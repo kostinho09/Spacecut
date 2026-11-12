@@ -45,9 +45,11 @@ Spacecut has been rebuilt from the ground up.
 
 ## Download
 
-Get version 2.0 from the [Releases](../../releases/latest) page:
-* macOS (11 or later, Apple silicon): `Spacecut_v2.0-Mac.zip`, a single app, `Spacecut.app` (FFmpeg is inside it)
-* Windows (10 or 11, 64-bit): `Spacecut_v2.0-Windows.zip`, a `Spacecut` folder with two files: `Spacecut.exe` and `ffmpeg.exe` beside it. Keep them together.
+Each link downloads the latest version at once:
+* **[Download for macOS](https://github.com/kostinho09/Spacecut/releases/latest/download/Spacecut-Mac.zip)** (11 or later, Apple silicon): a single app, `Spacecut.app` (FFmpeg is inside it)
+* **[Download for Windows](https://github.com/kostinho09/Spacecut/releases/latest/download/Spacecut-Windows.zip)** (10 or 11, 64-bit): a `Spacecut` folder with two files: `Spacecut.exe` and `ffmpeg.exe` beside it. Keep them together.
+
+What changed in each version is on the [Releases](../../releases) page.
 
 > [!IMPORTANT]
 > Spacecut is not notarized by Apple or signed with a Microsoft code-signing certificate (yet 👀), so macOS and Windows will warn you that it comes from an unidentified developer the first time you open it. This is expected.
@@ -113,6 +115,11 @@ You can also retrieve the link from any audio chunk: enter `chunk` in the filter
 
 
 ---
+
+## Contact
+
+- **Feedback, questions, bug reports and feature requests:** [send them with this form](https://tally.so/r/VpQMDj). Leave your email only if you would like a reply.
+- **X:** [@kostinho__](https://x.com/kostinho__)
 
 ## Privacy
 
