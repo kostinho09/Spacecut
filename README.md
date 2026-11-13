@@ -116,11 +116,6 @@ You can also retrieve the link from any audio chunk: enter `chunk` in the filter
 
 ---
 
-## Contact
-
-- **Feedback, questions, bug reports and feature requests:** [send them with this form](https://tally.so/r/VpQMDj). Leave your email only if you would like a reply.
-- **X:** [@kostinho__](https://x.com/kostinho__)
-
 ## Privacy
 
 Spacecut runs entirely on your computer. It connects only to X's servers, to get the audio of the Spaces you add, and when you open it it checks for a new version, but you can turn this off at any time. Nothing about you is sent. There are no accounts, analytics, telemetry, cookies or log files.
@@ -128,3 +123,7 @@ Spacecut runs entirely on your computer. It connects only to X's servers, to get
 ## License
 
 Spacecut is free software under the [GNU GPL v3](LICENSE). It includes FFmpeg; see [NOTICE.md](NOTICE.md).
+
+---
+
+Have feedback, a question, found a bug, or an idea for a new feature? Let me know using [this form](https://tally.so/r/VpQMDj). · X: [@kostinho__](https://x.com/kostinho__)
