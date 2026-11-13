@@ -49,8 +49,6 @@
 * **[Λήψη για macOS](https://github.com/kostinho09/Spacecut/releases/latest/download/Spacecut-Mac.zip)** (11 ή νεότερο, Apple silicon): μία εφαρμογή, το `Spacecut.app` (το FFmpeg είναι μέσα της)
 * **[Λήψη για Windows](https://github.com/kostinho09/Spacecut/releases/latest/download/Spacecut-Windows.zip)** (10 ή 11, 64-bit): ένας φάκελος `Spacecut` με δύο αρχεία: το `Spacecut.exe` και δίπλα του το `ffmpeg.exe`. Κρατήστε τα μαζί.
 
-Τι άλλαξε σε κάθε έκδοση θα το βρείτε στη σελίδα [Releases](../../releases).
-
 > [!IMPORTANT]
 > Το Spacecut δεν είναι (ακόμα) notarized από την Apple ούτε υπογεγραμμένο με πιστοποιητικό υπογραφής κώδικα της Microsoft, γι' αυτό το macOS και τα Windows θα σας προειδοποιήσουν ότι προέρχεται από άγνωστο developer την πρώτη φορά που θα το ανοίξετε. Αυτό είναι αναμενόμενο, μην πανικοβάλλεστε. Τα Windows βγάζουν αυτό το μήνυμα για κάθε app που δεν έχει πληρώσει τη Microsoft για ένα certificate επαλήθευσης. Το Spacecut είναι δωρεάν εργαλείο και δεν έχει λόγο να ξοδέψει εκατοντάδες δολάρια για να εξαφανίσει ένα παράθυρο.
 >
@@ -119,6 +117,18 @@
 ## Απόρρητο
 
 Το Spacecut λειτουργεί εξ ολοκλήρου στον υπολογιστή σας. Συνδέεται μόνο στους servers του X, για να πάρει τον ήχο των Spaces που προσθέτετε, και όταν το ανοίγετε ελέγχει αν υπάρχει νέα έκδοση, κάτι που μπορείτε να απενεργοποιήσετε όποτε θέλετε. Δεν αποστέλλεται τίποτα που να αφορά εσάς. Δεν υπάρχουν λογαριασμοί, analytics, telemetry, cookies ή αρχεία καταγραφής.
+
+## Συνεισφορά
+
+Αναφορές σφαλμάτων, ιδέες και pull requests είναι ευπρόσδεκτα. Για να φτιάξετε την εφαρμογή χρειάζεστε [Rust](https://rustup.rs) και το Tauri CLI:
+
+```
+cargo install tauri-cli --locked
+```
+
+Σε Mac χρειάζεστε επίσης τα command line tools του Xcode: `xcode-select --install`.
+
+Μετά τρέξτε `cargo tauri dev` στον φάκελο `src-tauri`.
 
 ## Άδεια
 

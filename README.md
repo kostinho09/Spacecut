@@ -49,8 +49,6 @@ Each link downloads the latest version at once:
 * **[Download for macOS](https://github.com/kostinho09/Spacecut/releases/latest/download/Spacecut-Mac.zip)** (11 or later, Apple silicon): a single app, `Spacecut.app` (FFmpeg is inside it)
 * **[Download for Windows](https://github.com/kostinho09/Spacecut/releases/latest/download/Spacecut-Windows.zip)** (10 or 11, 64-bit): a `Spacecut` folder with two files: `Spacecut.exe` and `ffmpeg.exe` beside it. Keep them together.
 
-What changed in each version is on the [Releases](../../releases) page.
-
 > [!IMPORTANT]
 > Spacecut is not notarized by Apple or signed with a Microsoft code-signing certificate (yet 👀), so macOS and Windows will warn you that it comes from an unidentified developer the first time you open it. This is expected.
 >
@@ -119,6 +117,18 @@ You can also retrieve the link from any audio chunk: enter `chunk` in the filter
 ## Privacy
 
 Spacecut runs entirely on your computer. It connects only to X's servers, to get the audio of the Spaces you add, and when you open it it checks for a new version, but you can turn this off at any time. Nothing about you is sent. There are no accounts, analytics, telemetry, cookies or log files.
+
+## Contributing
+
+Bug reports, ideas and pull requests are welcome. To build the app you need [Rust](https://rustup.rs) and the Tauri CLI:
+
+```
+cargo install tauri-cli --locked
+```
+
+On a Mac you also need Xcode's command line tools: `xcode-select --install`.
+
+Then run `cargo tauri dev` in the `src-tauri` folder.
 
 ## License
 
