@@ -18,6 +18,9 @@
   <a href="https://github.com/kostinho09/Spacecut/releases/latest/download/Spacecut-Windows.zip">
     <img src="https://img.shields.io/badge/Windows-download-3a3a3a?style=for-the-badge&labelColor=111111&logo=windows" alt="Windows"/>
   </a>
+  <a href="../../releases">
+    <img src="https://img.shields.io/github/downloads/kostinho09/Spacecut/total?style=for-the-badge&color=3a3a3a&labelColor=111111&label=downloads" alt="Downloads"/>
+  </a>
 </p>
 
 <p align="center">
