@@ -83,7 +83,7 @@ Each link downloads the latest version at once:
 ### 1. Get the Dynamic (Live) link while the Space is live
 
 1. Open the Space in your browser.
-2. Press **F12** to open the Developer Tools.
+2. Press **F12**, or right-click the page and choose **Inspect**, to open the Developer Tools.
 3. Go to the **Network** tab.
 4. Type `dynamic` in the filter box.
 5. Find the request containing `dynamic_playlist.m3u8?type=live`.
@@ -102,7 +102,7 @@ You can convert a Dynamic link at any time, even after the Space has ended, as l
 If the host enabled recording, you can retrieve the Replay link after the Space has ended:
 
 1. Open the Space in your browser.
-2. Press **F12** and go to the **Network** tab. Enter `m3u8` in the filter box **before** pressing Play.
+2. Press **F12**, or right-click the page and choose **Inspect**, and go to the **Network** tab. Enter `m3u8` in the filter box **before** pressing Play.
 3. Click **Play recording**.
 4. Look for a request containing `playlist_….m3u8?type=replay`.
 5. Right-click the request, select **Copy → Copy URL**, and paste the URL into Spacecut.
