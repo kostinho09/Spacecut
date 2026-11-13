@@ -34,7 +34,7 @@
 
 Spacecut has been rebuilt from the ground up.
 
-- **Lightweight and faster:** About 10× smaller (6.7 MB on Windows, 9.2 MB on macOS), and downloads 2–4× faster.
+- **Lightweight and faster:** 6–11× smaller (6.35 MB on Windows, 8.81 MB on macOS), and downloads 2–4× faster.
 - **Built-in player:** Listen to Spaces and mark clips in the same window.
 - **Live Spaces:** Listen while they're live, go back to any moment, and cut clips while the broadcast is still running.
 - **Long Spaces:** Cut and download Spaces of any length, without errors.
