@@ -12,10 +12,10 @@
   <a href="../../releases/latest">
     <img src="https://img.shields.io/github/v/release/kostinho09/Spacecut?style=for-the-badge&color=3a3a3a&labelColor=111111&label=latest%20release" alt="Latest Release"/>
   </a>
-  <a href="../../releases/latest">
+  <a href="https://github.com/kostinho09/Spacecut/releases/latest/download/Spacecut-Mac.zip">
     <img src="https://img.shields.io/badge/Mac-download-3a3a3a?style=for-the-badge&labelColor=111111&logo=apple" alt="Mac"/>
   </a>
-  <a href="../../releases/latest">
+  <a href="https://github.com/kostinho09/Spacecut/releases/latest/download/Spacecut-Windows.zip">
     <img src="https://img.shields.io/badge/Windows-download-3a3a3a?style=for-the-badge&labelColor=111111&logo=windows" alt="Windows"/>
   </a>
 </p>
