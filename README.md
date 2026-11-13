@@ -91,9 +91,9 @@ Each link downloads the latest version at once:
 
 > **Tip:** Save the Dynamic link while the Space is live. You can use it to generate a Replay link whenever you need, for up to 30 days after the Space ends.
 
-### 2. Convert it to a Replay (Master) link
+### 2. Convert it to a Replay link
 
-Paste the Dynamic (Live) link into the field at the top of Spacecut. It will automatically convert it into a Replay (Master) link, which opens in the built-in player.
+Paste the Dynamic (Live) link into the field at the top of Spacecut. It will automatically convert it into a Replay link, which opens in the built-in player.
 
 You can convert a Dynamic link at any time, even after the Space has ended, as long as you have saved it. The conversion remains possible for up to **30 days after the Space ends**. If you convert the Dynamic link while the Space is still live, the resulting Replay link will contain everything up to that exact moment.
 
