@@ -335,7 +335,8 @@ fn archive_of(dynamic: &str) -> Option<String> {
 /// dynamic link `live`, or from any link of it), each on the link's server
 /// and then on X's other servers:
 /// 1. where X keeps replays now (`REPLAYS`, pdxa),
-/// 2. the pieces where the live stream kept them (atla, say),
+/// 2. the pieces where the live stream kept them (atla, say; not for
+///    Spaces in the old place, see `search`),
 /// and only if both fail, the link as given, then the replay as Spaces used
 /// to have it, beside the dynamic playlist.
 pub fn resolve(url: &str, live: Option<&str>) -> Result<Playlist, String> {
@@ -559,7 +560,12 @@ fn search(url: &str, dynamic: &str, on_air: bool) -> Result<Playlist, String> {
             None
         }
     });
-    if let Some(list) = names.as_ref().or(given.as_ref().map(|(_, list)| list)) {
+    // Spaces in the old place (until 30 Oct 2026) kept their live pieces in
+    // the replay's own folder: asked for as live there, a piece opens only
+    // while a cache holds it (one played or cut a moment ago), the others
+    // answer 404, and that 404 is then handed out for the replay too
+    let live_apart = !dynamic.contains(OLD_LIVE);
+    if let Some(list) = names.as_ref().or(given.as_ref().map(|(_, list)| list)).filter(|_| live_apart) {
         for base in on_hosts(dynamic).iter().filter_map(|d| live_base(d)) {
             // The first live pieces may be gone already; one in the middle tells
             let moved = at_live(list.clone(), &base);
