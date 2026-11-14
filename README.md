@@ -105,10 +105,6 @@ If the host enabled recording, you can retrieve the Replay link after the Space 
 4. Look for a request containing `playlist_….m3u8?type=replay`.
 5. Right-click the request, select **Copy → Copy URL**, and paste the URL into Spacecut.
 
-The playlist request is sent only once, when you press Play. If you open the Network tab after playback has already started, refresh the page and click **Play recording** again.
-
-You can also retrieve the link from any audio chunk: enter `chunk` in the filter box and copy a URL containing `…/audio-space/chunk_….aac`. Then replace everything after `audio-space/` with `playlist_0.m3u8?type=replay`.
-
 
 ---
 
