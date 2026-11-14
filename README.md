@@ -89,8 +89,6 @@ Each link downloads the latest version at once:
 5. Find the request containing `dynamic_playlist.m3u8?type=live`.
 6. Right-click it → **Copy** → **Copy URL**.
 
-> **Tip:** Save the Dynamic link while the Space is live. You can use it to generate a Replay link whenever you need, for up to 30 days after the Space ends.
-
 ### 2. Convert it to a Replay link
 
 Paste the Dynamic (Live) link into the field at the top of Spacecut. It will automatically convert it into a Replay link, which opens in the built-in player.
