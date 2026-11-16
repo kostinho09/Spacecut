@@ -50,7 +50,7 @@ Each link downloads the latest version at once:
 * **[Download for Windows](https://github.com/kostinho09/Spacecut/releases/latest/download/Spacecut-Windows.zip)** (10 or 11, 64-bit): a `Spacecut` folder with two files: `Spacecut.exe` and `ffmpeg.exe` beside it. Keep them together.
 
 > [!IMPORTANT]
-> Spacecut is not notarized by Apple or signed with a Microsoft code-signing certificate (yet 👀), so macOS and Windows will warn you that it comes from an unidentified developer the first time you open it. This is expected.
+> Spacecut is not notarized by Apple or signed with a Microsoft code-signing certificate (yet 👀), so macOS and Windows will warn you the first time you open it. This is expected.
 >
 > You'll need to allow it before it opens. You only need to do this once:
 > - **macOS:** Go to System Settings → Privacy & Security and click **Open Anyway**.
