@@ -89,6 +89,12 @@ Each link downloads the latest version at once:
 5. Find the request containing `dynamic_playlist.m3u8?type=live`.
 6. Right-click it → **Copy** → **Copy URL**.
 
+<details>
+<summary><b>See example</b></summary>
+<br>
+<img src="assets/how-to-dynamic-link.webp" width="900" alt="Chrome's Developer Tools on a live Space: Inspect, the Network tab, the filter set to dynamic, and the dynamic_playlist.m3u8?type=live request" />
+</details>
+
 ### 2. Convert it to a Replay link
 
 Paste the Dynamic (Live) link into the field at the top of Spacecut. It will automatically convert it into a Replay link, which opens in the built-in player.
