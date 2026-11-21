@@ -89,6 +89,12 @@
 5. Βρείτε το request που περιέχει `dynamic_playlist.m3u8?type=live`.
 6. Κάντε δεξί κλικ πάνω του → **Copy** → **Copy URL**.
 
+<details>
+<summary><b>Δείτε <ins>παράδειγμα</ins></b></summary>
+<br>
+<img src="assets/how-to-dynamic-link.webp" width="900" alt="Τα Developer Tools του Chrome σε live Space: Inspect, η καρτέλα Network, το φίλτρο dynamic και το request dynamic_playlist.m3u8?type=live" />
+</details>
+
 ### 2. Μετατρέψτε το σε Replay link
 
 Επικολλήστε το Dynamic (Live) link στο πεδίο στο πάνω μέρος του Spacecut. Θα μετατραπεί αυτόματα σε Replay link, που ανοίγει στον ενσωματωμένο player.
