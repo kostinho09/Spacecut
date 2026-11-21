@@ -90,7 +90,7 @@ Each link downloads the latest version at once:
 6. Right-click it → **Copy** → **Copy URL**.
 
 <details>
-<summary><b>See example</b></summary>
+<summary><b>See <ins>example</ins></b></summary>
 <br>
 <img src="assets/how-to-dynamic-link.webp" width="900" alt="Chrome's Developer Tools on a live Space: Inspect, the Network tab, the filter set to dynamic, and the dynamic_playlist.m3u8?type=live request" />
 </details>
