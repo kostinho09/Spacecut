@@ -54,7 +54,7 @@ Each link downloads the latest version at once:
 >
 > You'll need to allow it before it opens. You only need to do this once:
 > - **macOS:** Go to System Settings → Privacy & Security and click **Open Anyway**.
-> - **Windows:** When Windows shows its security warning, click **More info** → **Run anyway**.
+> - **Windows:** When Windows shows its SmartScreen security warning, click **More info** → **Run anyway**.<br>If SAC (Smart App Control) is on, Windows 11 will block it.
 
 ---
 
