@@ -67,12 +67,10 @@ Each link downloads the latest version at once:
 - [x] Flexible clip selection: Set start and end points with Mark Start and Mark End, or drag across the timeline.
 - [x] Quick timestamps: Enter timestamps directly — `013045` automatically becomes `01:30:45`.
 - [x] Multiple Spaces: Work with several Spaces simultaneously, each with its own colour-coded tab.
-- [x] Batch cutting: Cut multiple clips in one go and track the progress of each individually.
 - [x] Original audio quality: Clips are extracted without re-encoding, preserving the original audio quality.
 - [x] Clip merging: Combine multiple clips into a single audio file and arrange them in any order using drag and drop.
 - [x] Custom transitions: Add sound effects or silence before, between, and after merged clips.
 - [x] Local media support: Extract audio from local video and audio files and save it in `.m4a` format.
-- [x] Playback controls: Adjust playback speed from 0.5× to 2× and skip forward or backward in 10-second intervals.
 - [x] Completion notifications: Get notified when a cutting operation is finished. (Only in macOS version)
 - [x] Appearance: Choose between light and dark mode or automatically follow your system settings.
 
